@@ -95,7 +95,7 @@ constexpr uint32_t kShTessLs = 0x3E0, kShTessHs = 0x3C0;
 uint64_t shader_addr(const RegState& r, uint32_t lo_idx) { return (uint64_t(r.sh[lo_idx + 1]) << 40) | (uint64_t(r.sh[lo_idx]) << 8); }
 
 // Debug: BB_DRAW_LOG prints the first draws; BB_SHADER_DIR=<dir> writes every distinct shader (<kind>_<crc>.bin = exact
-// code bytes, .txt = disassembly) once, which is the corpus for the GCN->SPIR-V translator.
+// code bytes, .txt = disassembly, .env = translation environment for `bbspv --replay`) once, which is the corpus for the GCN->SPIR-V translator.
 void note_shader(Context& c, const char* kind, uint64_t a, const RegState& r) {
     static const char* dir = std::getenv("BB_SHADER_DIR");
     static std::mutex m;
@@ -133,12 +133,28 @@ void note_shader(Context& c, const char* kind, uint64_t a, const RegState& r) {
     env.cs_tgid_en = (rsrc2 >> 7) & 7;
     env.cs_tidig_comps = (rsrc2 >> 11) & 3;
     for (int i = 0; i < 3; ++i) env.cs_local[i] = r.sh[0x207 + i];
-    env.read_mem = [&c](uint64_t addr, uint32_t* dst, uint32_t n) {
+    std::vector<std::pair<uint64_t, std::vector<uint32_t>>> reads;  // guest memory the translation read (s_load, fetch shader)
+    env.read_mem = [&c, &reads](uint64_t addr, uint32_t* dst, uint32_t n) {
         if (addr < 0x10000) return false;
         std::memcpy(dst, ptr<const uint32_t>(c, addr), size_t(n) * 4);
+        reads.emplace_back(addr, std::vector<uint32_t>(dst, dst + n));
         return true;
     };
     gpu::Translation t = gpu::translate(code, si.code_bytes / 4, env);
+    // <name>.env: the environment and the memory read, so `bbspv --replay <name>.bin` translates the shader offline the same way
+    if (FILE* f = std::fopen((std::string(name) + ".env").c_str(), "wb")) {
+        const uint32_t h[] = {0x56454242u /* "BBEV" */, uint32_t(env.stage), env.user_sgprs, env.ps_input_addr, env.vs_out_cntl, env.cs_tgid_en,
+                              env.cs_tidig_comps, env.cs_local[0], env.cs_local[1], env.cs_local[2], uint32_t(reads.size())};
+        std::fwrite(h, 4, sizeof h / 4, f);
+        std::fwrite(env.user, 4, 16, f);
+        for (const auto& [at, d] : reads) {
+            const uint32_t n = uint32_t(d.size());
+            std::fwrite(&at, 8, 1, f);
+            std::fwrite(&n, 4, 1, f);
+            std::fwrite(d.data(), 4, n, f);
+        }
+        std::fclose(f);
+    }
     if (FILE* f = std::fopen(txt.c_str(), "a")) {
         if (t.error.empty()) {
             std::fprintf(f, "; translated: %zu words, %zu resources, %zu loads\n", t.spirv.size(), t.resources.size(), t.loads.size());

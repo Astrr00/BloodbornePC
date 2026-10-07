@@ -103,6 +103,38 @@ int main() {
         check("if/else scalar state", t);
         assert(t.loads.size() == 1 && t.resources.size() == 1 && t.resources[0].load_data);
     }
+    {  // scalar-branch shapes a structured selection cannot express are rejected with a reason, never translated into wrong/invalid SPIR-V
+        GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+        auto fails = [&](const char* what, const uint32_t* c, size_t n, const char* reason) {
+            const Translation t = translate(c, n, env);
+            if (t.error.find(reason) == std::string::npos) { std::fprintf(stderr, "%s: expected \"%s\", got \"%s\"\n", what, reason, t.error.c_str()); std::abort(); }
+        };
+        // overlapping ranges: s_cmp; s_cbranch_scc0 A(5); s_cmp; s_cbranch_scc1 B(6); v0 = 1.0; A: v0 = 2.0; B: exp mrt0
+        const uint32_t overlap[] = {0xBF000100, 0xBF840003, 0xBF000100, 0xBF850002, 0x7E0002F2, 0x7E0002F4, 0xF8001C0F, 0x00000000, 0xBF810000};
+        fails("overlapping regions", overlap, 9, "crosses the end of the enclosing branch region");
+        // jump out of a region (not the if/else shape): s_cmp; s_cbranch_scc0 A(4); s_branch B(5); v0 = 1.0; A: v0 = 2.0; B: exp mrt0
+        const uint32_t out[] = {0xBF000100, 0xBF840002, 0xBF820002, 0x7E0002F2, 0x7E0002F4, 0xF8001C0F, 0x00000000, 0xBF810000};
+        fails("s_branch out of a region", out, 8, "s_branch leaves a scalar-branch region");
+        // backward jump into a region: s_cmp; s_cbranch_scc0 A(5); L: v0 = 1.0; s_cmp; s_cbranch_scc1 L; A: exp mrt0
+        const uint32_t loop[] = {0xBF000100, 0xBF840003, 0x7E0002F2, 0xBF000100, 0xBF85FFFD, 0xF8001C0F, 0x00000000, 0xBF810000};
+        fails("loop inside a region", loop, 8, "loop inside a scalar-branch region");
+    }
+    {  // s_endpgm inside a region with code behind it ends only that path: s_cmp; s_cbranch_scc0 A; v0 = 1.0; exp; s_endpgm; A: v0 = 2.0; exp
+        const uint32_t c[] = {0xBF000100, 0xBF840004, 0x7E0002F2, 0xF8001C0F, 0x00000000, 0xBF810000, 0x7E0002F4, 0xF8001C0F, 0x00000000, 0xBF810000};
+        GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+        Translation t = translate(c, 10, env);
+        check("s_endpgm in a region", t);
+        assert(find_op(t.spirv, spv::Op::OpConstant, [](const uint32_t* w) { return (w[0] >> 16) == 4 && w[3] == 0x40000000u; }));  // A was translated
+    }
+    {  // jump threading (a clinic CS): the inner then-region jumps past the outer region to where the outer region's closing s_branch goes.
+       // s_cmp; s_cbranch_scc1 X; s_cmp; s_cbranch_scc0 E; v0 = 1.0; s_branch T; E: v0 = 2.0; s_branch T; X: v0 = 4.0; T: exp mrt0
+        const uint32_t c[] = {0xBF000100, 0xBF850006, 0xBF000100, 0xBF840002, 0x7E0002F2, 0xBF820003, 0x7E0002F4, 0xBF820001, 0x7E0002F6,
+                              0xF8001C0F, 0x00000000, 0xBF810000};
+        GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+        Translation t = translate(c, 12, env);
+        check("jump threading", t);
+        assert(find_op(t.spirv, spv::Op::OpConstant, [](const uint32_t* w) { return (w[0] >> 16) == 4 && w[3] == 0x40800000u; }));  // X was translated
+    }
     {  // lane id: v_mbcnt_lo_u32_b32 v25, exec_lo, v25 + v_mbcnt_hi_u32_b32_e64 v25, exec_hi, 0, s0
         const uint32_t c[] = {0x4632327E, 0xD2480019, 0x0001007F, 0xBF810000};
         GcnEnv env; env.stage = ShStage::CS;

@@ -37,6 +37,7 @@
 #include "gpu/tiling.h"
 #include "gpu/gcn_spirv.h"
 #include "gpu/gpu_hooks.h"
+#include "gpu/pad.h"
 #include "gpu/spirv_builder.h"
 #include "gpu/vk_context.h"
 #include "gpu/write_watch.h"
@@ -192,6 +193,7 @@ struct Image {
     uint64_t base = 0;
     bool cube_ok = false;                  // created CUBE_COMPATIBLE (layered render targets with a multiple of 6 slices)
     bool srgb_storage = false;             // sRGB format with storage use: MUTABLE + EXTENDED_USAGE, storage views in the UNORM twin
+    bool mutable_fmt = false;              // texture of one memory for every number format: views take the T#'s format (get_texture)
     std::vector<VkImageView> layer_views;  // single-layer 2D views of a layered render target (one attachment per CB slice), lazily created
     // Replay carried state (the interpolation hybrid, see Backend::note_read): tick of the first access and its kind (1 read, 2 write); `carry` once a
     // tick read it before writing it (its contents come from earlier ticks); copies before the tick's first write / after the tick.
@@ -455,7 +457,7 @@ struct Backend {
     void begin();
     void flush(bool wait = true);
     uint8_t* ring_alloc(size_t n, size_t align, size_t& offset);
-    Image* make_image(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt, VkImageViewType vt, VkImageUsageFlags usage, bool cube = false, uint32_t levels = 1);
+    Image* make_image(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt, VkImageViewType vt, VkImageUsageFlags usage, bool cube = false, uint32_t levels = 1, bool mutable_fmt = false);
     void destroy_image(Image* im);
     void ensure_init(Image* im);
     void barrier(VkPipelineStageFlags src = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VkAccessFlags src_access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
@@ -685,7 +687,8 @@ struct Backend {
     void dispatch(const RegView& r, uint32_t x, uint32_t y, uint32_t z);
     bool image_cs_op(const BoundShader& cs, uint32_t x, uint32_t local_x);
 
-    std::unordered_map<std::array<uint64_t, 2>, VkImageView, ArrayHash<2>> views;  // by image, swizzle, layer range, view type (texture_view)
+    std::unordered_map<std::array<uint64_t, 3>, VkImageView, ArrayHash<3>> views;  // by image, swizzle, layer/level range, view type, view format (texture_view)
+    std::unordered_map<uint64_t, std::array<float, 4>> mem_fill;  // colour of the last CPU fill helper at an address (a target created there starts with it)
 };
 
 Backend* g_be = nullptr;
@@ -1857,10 +1860,10 @@ uint8_t* Backend::ring_alloc(size_t n, size_t align, size_t& offset) {
     return ring.mapped + at;
 }
 
-Image* Backend::make_image(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt, VkImageViewType vt, VkImageUsageFlags usage, bool cube, uint32_t levels) {
+Image* Backend::make_image(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt, VkImageViewType vt, VkImageUsageFlags usage, bool cube, uint32_t levels, bool mutable_fmt) {
     VkCtx& c = vk();
     auto* im = new Image;
-    im->w = w; im->h = h; im->layers = layers; im->format = fmt; im->view_type = vt; im->cube_ok = cube; im->levels = levels;
+    im->w = w; im->h = h; im->layers = layers; im->format = fmt; im->view_type = vt; im->cube_ok = cube; im->levels = levels; im->mutable_fmt = mutable_fmt;
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = vt == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : (vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY) ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D;
     ici.format = fmt;
@@ -1871,11 +1874,11 @@ Image* Backend::make_image(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = usage;
-    ici.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+    ici.flags = (cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) | (mutable_fmt ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0);
     // sRGB + storage is not a supported combination (validation: VUID-VkImageCreateInfo-imageCreateMaxMipLevels-02251): the storage
     // usage is granted through the UNORM twin view
     im->srgb_storage = (usage & VK_IMAGE_USAGE_STORAGE_BIT) && unorm_twin(fmt) != fmt;
-    if (im->srgb_storage) ici.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+    if (im->srgb_storage) { ici.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; im->mutable_fmt = true; }
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -1896,6 +1899,10 @@ void Backend::destroy_image(Image* im) {
     VkCtx& c = vk();
     if (im->view) vkDestroyImageView(c.device, im->view, nullptr);
     for (VkImageView v : im->layer_views) if (v) vkDestroyImageView(c.device, v, nullptr);
+    // its texture_view cache entries (keyed by the VkImage handle: a later image reusing the handle would get these stale views)
+    // ponytail: linear scan of all views per destroyed image; images die rarely (graveyard, replay twins)
+    const uint64_t h = reinterpret_cast<uintptr_t>(im->image);
+    std::erase_if(views, [&](const auto& kv) { if (kv.first[0] != h) return false; vkDestroyImageView(c.device, kv.second, nullptr); return true; });
     if (im->image) vmaDestroyImage(c.vma, im->image, im->alloc);
     for (Image* t : {im->pre, im->post}) if (t) destroy_image(t);
     delete im;
@@ -2150,9 +2157,10 @@ Image* Backend::get_rt(uint64_t base, uint32_t w, uint32_t h, VkFormat fmt, uint
         graveyard_pending.push_back(it->second.release());
         rts.erase(it);
     }
+    // (MUTABLE: a T# may read the target in another number format, e.g. the blood maps' mip copy loads an sRGB target as UINT)
     Image* im = make_image(w * want, h * want, layers, fmt, layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                           layers >= 6 && layers % 6 == 0 && w == h);
+                           layers >= 6 && layers % 6 == 0 && w == h, 1, true);
     if (!im) return nullptr;
     im->scale = want;
     im->base = base;
@@ -2297,17 +2305,19 @@ Image* Backend::get_texture(const uint32_t* w, bool storage, uint32_t pad_axes) 
     auto dsit = dss.find(base);  // a depth buffer sampled as a texture (shadow maps etc.)
     if (dsit != dss.end() && dsit->second->format != VK_FORMAT_S8_UINT && dsit->second->gw() >= width && dsit->second->gh() >= height) { ensure_init(dsit->second.get()); tex_memo_ok = true; return dsit->second.get(); }
 
-    // Sampled and storage uses of the same memory must be one VkImage (a compute pass writes what a later pixel shader samples).
-    (void)storage;
+    // Sampled and storage uses of the same memory must be one VkImage (a compute pass writes what a later pixel shader samples), whatever
+    // number format each T# names: the blood maps of the characters are written through a UINT storage T# per mip level and sampled
+    // as sRGB with the full chain; separate images left the sampled one with the stale guest bytes (black or rainbow fur, ROADMAP 97).
+    // Uncompressed textures are therefore keyed without the number format, created MUTABLE, and viewed in the T#'s format (texture_view).
     // Slices: T# DEPTH or LAST_ARRAY (word 5 [25:13]) + 1, whichever is larger; cube maps often leave DEPTH 0 and name the faces only
     // through LAST_ARRAY, and a cube view needs whole sets of 6 faces. The slice count is part of the image identity (key): a 36-layer
     // cube array at the address of a 6-layer cube is another image (validation VUID 07968: upload past the existing image's layers).
     const bool arrayed = type == 12 || type == 13 || type == 11 || type == 10;
     const uint32_t last_array = (w[5] >> 13) & 0x1FFF;
     const uint32_t layers = !arrayed ? 1 : type == 10 ? depth : type == 11 ? (std::max(depth, last_array + 1) + 5) / 6 * 6 : std::max(depth, last_array + 1);
-    const std::array<uint64_t, 3> key{base, width | uint64_t(height) << 16 | uint64_t(layers) << 32, dfmt | nfmt << 8 | type << 16 | tile << 24};
-    auto kstr = [&] { char b[96]; std::snprintf(b, sizeof b, "%llx:%u:%u:%u:%u:%u:%u:%u", (unsigned long long)base, width, height, layers, dfmt, nfmt, type, tile); return std::string(b); };  // log keys
     TexFmt tf = tex_format(dfmt, nfmt);
+    const std::array<uint64_t, 3> key{base, width | uint64_t(height) << 16 | uint64_t(layers) << 32, dfmt | (tf.block == 1 ? 0 : nfmt) << 8 | type << 16 | tile << 24};
+    auto kstr = [&] { char b[96]; std::snprintf(b, sizeof b, "%llx:%u:%u:%u:%u:%u:%u:%u", (unsigned long long)base, width, height, layers, dfmt, nfmt, type, tile); return std::string(b); };  // log keys
     VkImageViewType vt = type == 8 ? VK_IMAGE_VIEW_TYPE_1D : type == 12 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : type == 13 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                        : type == 10 ? VK_IMAGE_VIEW_TYPE_3D : type == 11 ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
     if (tf.vk == VK_FORMAT_UNDEFINED || type < 8 || type > 13) {
@@ -2318,12 +2328,14 @@ Image* Backend::get_texture(const uint32_t* w, bool storage, uint32_t pad_axes) 
     Image* im = it != tex_lut.end() ? it->second : nullptr;
     if (!im) {
         // a mipped T# (BASE_LEVEL [15:12] or LAST_LEVEL [19:16] of word 3 above 0) gets the full chain: storage writes to level n (mip
-        // generation) and sampling of the chain must meet in one image. ponytail: volume textures keep level 0 only (the clinic's two
+        // generation) and sampling of the chain must meet in one image. A storage T# gets it too: the mip generation's level-0 store
+        // (BASE = LAST = 0) comes first and creates the image. ponytail: an image first created by a sampled level-0-only T# stays
+        // one level (recreate on growth if a game writes mips into such a texture); volume textures keep level 0 only (the clinic's two
         // 16x16x16 volumes have no mips; logged).
         const uint32_t ih = vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? 1 : height;
-        const uint32_t levels = type != 10 && (w[3] >> 12 & 0xFF) ? uint32_t(std::bit_width(std::max(width, ih))) : 1;
+        const uint32_t levels = type != 10 && ((w[3] >> 12 & 0xFF) || (storage && tf.block == 1)) ? uint32_t(std::bit_width(std::max(width, ih))) : 1;
         im = make_image(width, ih, layers, tf.vk, vt,
-                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (tf.block == 1 ? VK_IMAGE_USAGE_STORAGE_BIT : 0), type == 11, levels);
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (tf.block == 1 ? VK_IMAGE_USAGE_STORAGE_BIT : 0), type == 11, levels, tf.block == 1);
         if (!im) return nullptr;
         im->base = base;
         ++tex_texture_images, tex_mipped += levels > 1;
@@ -2526,19 +2538,29 @@ VkImageView Backend::texture_view(Image* im, const uint32_t* w, bool swizzle) {
     // mip range BASE_LEVEL..LAST_LEVEL (word 3 [15:12] / [19:16]) within the image's levels; a storage view holds one level
     const uint32_t base_level = std::min((w[3] >> 12) & 15, im->levels - 1);
     const uint32_t level_count = swizzle ? std::min(std::max((w[3] >> 16) & 15, base_level), im->levels - 1) - base_level + 1 : 1;
-    const bool storage_twin = !swizzle && im->srgb_storage;  // storage use of an sRGB image: the UNORM twin view (see make_image)
-    const std::array<uint64_t, 2> key{reinterpret_cast<uintptr_t>(im->image),
+    // view format: on a mutable image (one texture for every number format, see get_texture; render targets) the T#'s number format
+    // within the image format's family (same dfmt: e.g. an sRGB target loaded as UINT), else the image's; storage views cannot be sRGB
+    // (the UNORM twin: the store writes the raw bits either way)
+    VkFormat vf = im->format;
+    if (im->mutable_fmt) {
+        const uint32_t dfmt = (w[1] >> 20) & 0x3F;
+        const VkFormat tv = tex_format(dfmt, (w[1] >> 26) & 0xF).vk;
+        for (const uint32_t n : {0u, 1u, 4u, 5u, 7u, 9u})
+            if (tv != VK_FORMAT_UNDEFINED && tex_format(dfmt, n).vk == im->format) { vf = tv; break; }
+        if (!swizzle) vf = unorm_twin(vf);
+    }
+    const std::array<uint64_t, 3> key{reinterpret_cast<uintptr_t>(im->image),
                                       uint64_t(map[0]) | uint64_t(map[1]) << 4 | uint64_t(map[2]) << 8 | uint64_t(map[3]) << 12 | uint64_t(base_layer) << 16 | uint64_t(layer_count) << 32 | uint64_t(vt) << 48 |
-                                      uint64_t(base_level) << 52 | uint64_t(level_count) << 56 | uint64_t(storage_twin) << 63};
+                                      uint64_t(base_level) << 52 | uint64_t(level_count) << 56, uint64_t(vf)};
     auto it = views.find(key);
     if (it != views.end()) return it->second;
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     VkImageViewUsageCreateInfo vu{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-    vu.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (im->srgb_storage && !storage_twin) vci.pNext = &vu;  // an sRGB view must not carry the image's storage usage
+    vu.usage = swizzle ? VK_IMAGE_USAGE_SAMPLED_BIT : VK_IMAGE_USAGE_STORAGE_BIT;
+    if (im->srgb_storage || vf != im->format) vci.pNext = &vu;  // e.g. an sRGB view must not carry the image's storage usage
     vci.image = im->image;
     vci.viewType = vt;
-    vci.format = storage_twin ? unorm_twin(im->format) : im->format;
+    vci.format = vf;
     vci.components = {map[0], map[1], map[2], map[3]};
     vci.subresourceRange = {im->ds ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT) : VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT), base_level, level_count, base_layer, layer_count};
     VkImageView v = VK_NULL_HANDLE;
@@ -2632,6 +2654,8 @@ bool Backend::write_descriptors(const BoundShader& bs, DescInfo* info) {
                     if (res[i].written) { wb_s[slot].push_back({reinterpret_cast<uint8_t*>(base), off, size}); dirty_add(base, base + size); op_unsafe = true; gpu_watch("shader (write-back)", base, size, bs.e->log_name.c_str()); }
                     else if (replay_on && replay_lerp && res[i].scalar && size == 864) note_site(p, off);
                     else if (obj_capture && (pal || (res[i].scalar && size <= 4096))) note_obj(p, off, size, uint32_t(bs.e->stage) << 16 | uint32_t(i), pal);
+                    static const bool nav_cam = nav_camera_wanted();
+                    if (nav_cam && res[i].scalar && size == 864 && !res[i].written) nav_note_camera(reinterpret_cast<const uint32_t*>(p));
                 } else {
                     std::memset(p, 0, size);
                     log_once("vb" + std::to_string(base), "buffer resource points at unmapped memory");
@@ -3217,9 +3241,18 @@ void Backend::draw(const RegView& r, const DrawCmd& d_in) {
         if (!im) { ++skipped, ++skip_by["rt_alloc"]; return; }
         im->bgra = bgra;
         if (cbr[7]) cmask_rt[uint64_t(cbr[7]) << 8] = base;
-        if (fast_clear_pending.erase(base)) {  // CMASK fast clear: every tile reads as the clear colour (CB_COLOR*_CLEAR_WORD) until a draw covers it
+        // A fill helper that ran on this memory before it became a target (CPU fill of plain memory, image_cs_op) set its first contents:
+        // a new target starts with that colour, not zero (the characters' blood maps: zero alpha turned bloodied fur black, ROADMAP 97).
+        const auto mf = !im->initialised ? mem_fill.find(base) : mem_fill.end();
+        const bool fast = fast_clear_pending.erase(base) > 0;
+        if (mf != mem_fill.end() || fast) {  // CMASK fast clear: every tile reads as the clear colour (CB_COLOR*_CLEAR_WORD) until a draw covers it
             VkClearColorValue cc{};
-            if ((cbr[11] | cbr[12]) && (fmt == VK_FORMAT_R8G8B8A8_UNORM || fmt == VK_FORMAT_R8G8B8A8_SRGB))  // ponytail: only 8-bit RGBA clear words are decoded, other formats clear to 0
+            if (mf != mem_fill.end() && !fast) {
+                const std::array<float, 4>& c = mf->second;  // (memory order; sRGB targets: ponytail, 0 and 1 only are exact)
+                const float rgba[4] = {bgra ? c[2] : c[0], c[1], bgra ? c[0] : c[2], c[3]};
+                std::memcpy(cc.float32, rgba, 16);
+                mem_fill.erase(mf);
+            } else if ((cbr[11] | cbr[12]) && (fmt == VK_FORMAT_R8G8B8A8_UNORM || fmt == VK_FORMAT_R8G8B8A8_SRGB))  // ponytail: only 8-bit RGBA clear words are decoded, other formats clear to 0
                 for (unsigned ch = 0; ch < 4; ++ch) cc.float32[ch] = float((cbr[11] >> (8 * ch)) & 0xFF) / 255.f;
             ensure_init(im);
             note_write(im);
@@ -3856,6 +3889,7 @@ bool Backend::image_cs_op(const BoundShader& cs, uint32_t x, uint32_t local_x) {
             if (overlaps_dirty(dst, dst + count * stride)) flush();
             uint8_t* out = reinterpret_cast<uint8_t*>(dst);
             gpu_watch("fill helper CS", dst, count * stride);
+            if (comps == 4 && (dnfmt == 0 || dnfmt == 7)) mem_fill[dst] = {col[0], col[1], col[2], col[3]};  // (a render target created here later)
             {  // one byte value: memset; else the first element, then doubling copies (a memcpy per element was ~8 % of the render thread)
                 const uint64_t total = count * stride;
                 bool same = true;
@@ -4171,8 +4205,10 @@ void Backend::pixel_probe(const std::string& who) {
     static uint64_t last = 0;
     static int n = 0;
     static const auto t0 = std::chrono::steady_clock::now();
-    static const long after_s = std::getenv("BB_PIXEL_AFTER") ? std::atol(std::getenv("BB_PIXEL_AFTER")) : 0;  // debug: start probing after N wall seconds
-    if (draws < pp.from || n >= 80000 || std::chrono::steady_clock::now() - t0 < std::chrono::seconds(after_s)) return;
+    static const char* after_e = std::getenv("BB_PIXEL_AFTER");  // debug: start probing after N wall seconds ("p<N>": on the pad script clock)
+    static const bool after_pad = after_e && *after_e == 'p';
+    static const long after_s = after_e ? std::atol(after_e + after_pad) : 0;
+    if (draws < pp.from || n >= 80000 || (after_pad ? pad_script_clock() < double(after_s) : std::chrono::steady_clock::now() - t0 < std::chrono::seconds(after_s))) return;
     static bool said = false;
     auto it = rts.find(pp.rt);
     auto dit = dss.find(pp.rt);  // a depth buffer: its depth plane is read (float32)
@@ -4212,7 +4248,7 @@ struct BeLock {  // the backend lock for draws/dispatches; a contended wait (fen
     std::unique_lock<std::mutex> lk{g_be->mtx, std::try_to_lock};
     BeLock() { if (!lk.owns_lock()) { const Clk k; lk.lock(); g_ns_lock += k.ns_since(); } }
 };
-// BB_OPS_LOG=<first>,<count> (or t<seconds>,<count>): from the <first>-th draw (or that wall second) on, log <count> draws/dispatches with
+// BB_OPS_LOG=<first>,<count> (or t<seconds>,<count> / p<pad-clock seconds>,<count>): from the <first>-th draw (or that second) on, log <count> draws/dispatches with
 // their shaders, targets and outcome (recorded / skip reason)
 struct OpsLog {
     bool active = false;
@@ -4220,15 +4256,15 @@ struct OpsLog {
     uint64_t rendered0 = 0, dispatched0 = 0;
     static bool enabled(const Backend& b, uint64_t counted) {
         static uint64_t first = 0, count = 0, left = 0;
-        static bool secs = false;
+        static char clock = 0;  // 't': wall seconds, 'p': pad script clock (BB_PAD_CLOCK=flips: the same game state in every run)
         static const auto t0 = std::chrono::steady_clock::now();
         static const bool on = [] {
             const char* e = std::getenv("BB_OPS_LOG");
-            if (e && *e == 't') { secs = true; ++e; }
+            if (e && (*e == 't' || *e == 'p')) clock = *e++;
             return e && std::sscanf(e, "%llu,%llu", (unsigned long long*)&first, (unsigned long long*)&count) == 2;
         }();
         if (!on) return false;
-        const bool due = secs ? std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(first) : counted >= first;
+        const bool due = clock == 't' ? std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(first) : clock == 'p' ? pad_script_clock() >= double(first) : counted >= first;
         if (left == 0 && due && count) { left = count; count = 0; }
         if (left == 0) return false;
         --left;
@@ -4469,12 +4505,13 @@ void hook_end_submit() {
         if (!g_be->recording && !g_be->labels_s[g_be->slot].empty()) g_be->settle(g_be->slot);  // labels without recorded work
         g_ns_flush += k.ns_since();
     }
-    static const char* stats = std::getenv("BB_GPU_STATS");  // "1": every 300 submits; "t<seconds>": once at that wall time
+    static const char* stats = std::getenv("BB_GPU_STATS");  // "1": every 300 submits; "t<seconds>": once at that wall time; "p<seconds>": on the pad script clock
     static uint64_t submits = 0;
     static const auto stats_t0 = std::chrono::steady_clock::now();
     static bool stats_once = false;
-    if (stats && stats[0] == 't') {
-        if (!stats_once && std::chrono::steady_clock::now() - stats_t0 >= std::chrono::duration<double>(std::atof(stats + 1))) { stats_once = true; report_rt_stats(); }
+    if (stats && (stats[0] == 't' || stats[0] == 'p')) {
+        const double now = stats[0] == 'p' ? pad_script_clock() : std::chrono::duration<double>(std::chrono::steady_clock::now() - stats_t0).count();
+        if (!stats_once && now >= std::atof(stats + 1)) { stats_once = true; report_rt_stats(); }
     } else if (stats && ++submits % 300 == 0) report_rt_stats();
     static uint64_t last = 0;
     if (g_be->verbose && g_be->draws - last >= 100) {

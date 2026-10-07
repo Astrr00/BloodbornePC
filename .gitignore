@@ -16,3 +16,4 @@ graphify-out/
 savedata*/
 *.log
 dump*/
+play/

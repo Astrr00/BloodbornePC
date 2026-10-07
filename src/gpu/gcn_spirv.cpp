@@ -188,8 +188,22 @@ private:
     // Forward s_cbranch_scc0/1: a structured selection (SCC is wave-uniform, so the region really is skipped - scalar writes in it must not
     // happen otherwise). `alt`: the not-taken path's first block (no else-region: an empty block placed when the selection closes); after an
     // if/else switch (see s_branch) the then-path's deferred exit block. `syms`/`kts`: compile-time register knowledge on entry to the
-    // other path (then: at the branch; after the switch: at the end of the then-region).
-    struct Join { size_t pc; Id merge, alt; Sym syms[128]; std::map<unsigned, bool> kts; bool els = false; };
+    // other path (then: at the branch; after the switch: at the end of the then-region). `thread`: the then-region really jumps there, past
+    // the enclosing region, whose closing s_branch goes there too (see s_branch); the else-region ends with the enclosing one.
+    struct Join { size_t pc; Id merge, alt; Sym syms[128]; std::map<unsigned, bool> kts; bool els = false; size_t thread = 0; };
+    // the instruction stream from `from` has an s_branch to `target` as the last instruction before `end`
+    bool branch_before(size_t from, size_t end, size_t target) const {
+        for (size_t k = from; k < end && k < n_;) {
+            const Insn i = gcn::decode(code_ + k, n_ - k);
+            if (i.fmt == GcnFmt::Invalid) return false;
+            if (k + i.len == end) {
+                const char* mc = gcn::mnemonic(i.fmt, i.op);
+                return mc && !std::strcmp(mc, "s_branch") && int64_t(end) + int16_t(i.w[0] & 0xFFFF) == int64_t(target);
+            }
+            k += i.len;
+        }
+        return false;
+    }
     std::vector<Join> joins_;
     std::map<unsigned, bool> lane_kts() const {
         std::map<unsigned, bool> m;
@@ -1899,7 +1913,14 @@ bool Xlat::step(const Insn& in) {
     }
     switch (in.fmt) {
         case GcnFmt::SOPP: {
-            if (m == "s_endpgm") { ended_ = true; return true; }
+            if (m == "s_endpgm") {
+                if (ret_code_ || joins_.empty() || joins_.back().pc >= n_) { ended_ = true; return true; }
+                // inside a scalar-branch region with code behind it: only this path ends (the other one goes on at the region's end)
+                if (tess()) return fail("s_endpgm inside a scalar-branch region of an LS/DS", &in);
+                b.op0(Op::OpReturn, {});
+                b.place_label(b.label());  // (unreachable rest of the region)
+                return true;
+            }
             if (m == "s_waitcnt" || m == "s_nop" || m == "s_sendmsg" || m == "s_setprio" || m == "s_icache_inv" || m == "s_ttracedata") return true;
             // Workgroup execution/Workgroup memory scope, AcquireRelease (0x8 << 8) | WorkgroupMemory (0x4): 0x108 was
             // CrossDeviceMemory with an invalid semantic, which ordered nothing and did not cover the LDS.
@@ -1909,21 +1930,32 @@ bool Xlat::step(const Insn& in) {
                 return true;  // forward skip of exec-predicated work: executing it with exec=0 is a no-op
             if (m == "s_branch" && off >= 0) {
                 const size_t target = pc_ + in.len + size_t(off);
+                // the closing s_branch of an enclosing region, also taken by the then-paths threaded to it (see below): those regions end here
+                while (!ret_code_ && !joins_.empty() && joins_.back().els && joins_.back().thread == target && joins_.back().pc == pc_ + in.len) close_join();
                 // if/else: a then-region ending in a jump over the else-region (the else-region runs iff the then-region did not; skipping it
                 // dropped a particle PS's default blend path - the clinic lamp glow came out green).
-                if (!ret_code_ && !joins_.empty() && joins_.back().pc == pc_ + in.len && !joins_.back().els && target > joins_.back().pc &&
-                    (joins_.size() < 2 || joins_[joins_.size() - 2].pc >= target)) {
+                if (!ret_code_ && !joins_.empty() && joins_.back().pc == pc_ + in.len && !joins_.back().els && target > joins_.back().pc) {
+                    size_t end = target, thread = 0;
+                    if (joins_.size() >= 2 && joins_[joins_.size() - 2].pc < target) {
+                        // jump threading (a 12 KB clinic CS): the then-region jumps past the enclosing region to where that region's own closing
+                        // s_branch goes. Equivalent: the else-region ends with the enclosing region and the then-path leaves through that s_branch.
+                        end = joins_[joins_.size() - 2].pc;
+                        if (!branch_before(pc_ + in.len, end, target)) return fail("s_branch leaves a scalar-branch region", &in);
+                        thread = target;
+                    }
                     Join& j = joins_.back();
                     const Id fix = b.label();
                     b.op0(Op::OpBranch, {fix});
                     b.place_label(j.alt);
-                    j.alt = fix; j.pc = target; j.els = true;
+                    j.alt = fix; j.pc = end; j.els = true; j.thread = thread;
                     std::swap(sym_, j.syms);  // the else-region starts from the branch state; the join keeps the then-state
                     auto kts = lane_kts();
                     for (auto& [s, l] : lm_) { auto it = j.kts.find(s); l.kt = it != j.kts.end() && it->second; }
                     j.kts = std::move(kts);
                     return true;
                 }
+                // a plain forward jump: skipped for every path, so it must stay inside the innermost region
+                if (!joins_.empty() && target > joins_.back().pc) return fail("s_branch leaves a scalar-branch region", &in);
                 skip_until_ = target;
                 return true;
             }
@@ -1933,9 +1965,11 @@ bool Xlat::step(const Insn& in) {
                 if (!scc_) return fail("SCC read before any write", &in);
                 Id taken = ld(scc_, B);
                 if (m == "s_cbranch_scc1") taken = op(Op::OpLogicalNot, B, {taken});  // run the region iff the branch is not taken
+                const size_t target = pc_ + in.len + size_t(off);
+                if (!joins_.empty() && target > joins_.back().pc) return fail("scalar branch crosses the end of the enclosing branch region", &in);
                 joins_.emplace_back();
                 Join& j = joins_.back();
-                j.pc = pc_ + in.len + size_t(off);
+                j.pc = target;
                 j.merge = b.label(); j.alt = b.label();
                 std::copy(std::begin(sym_), std::end(sym_), j.syms);
                 j.kts = lane_kts();
@@ -2127,7 +2161,7 @@ bool Xlat::run() {
         if (!jumped_) pc_ += in.len;
     }
     if (err_.empty() && !ended_) fail("no s_endpgm");
-    while (err_.empty() && !joins_.empty()) close_join();  // s_endpgm inside a region: close the open selections
+    while (err_.empty() && !joins_.empty()) close_join();  // regions reaching to the end of the code (s_endpgm inside): close them
     if (!err_.empty()) return false;
     finish_tess();
     b.op0(Op::OpReturn, {});

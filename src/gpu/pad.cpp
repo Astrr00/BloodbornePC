@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -115,21 +116,24 @@ void pad_handle_event(const SDL_Event& e) {
 }
 
 // BB_PAD_SCRIPT="45:circle,53:down,..." : reproducible test input; each entry presses the button once, `seconds` after the
-// first pad poll of the game (the title screen needs ~45 s). Names: up down left right cross circle square triangle l1 r1 l2 r2 options.
+// first pad poll of the game (the title screen needs ~45 s). Names: up down left right cross circle square triangle l1 r1 l2 r2 l3 r3 options.
 // "110:rx=255,112:rx=128": from then on that stick axis (lx / ly / rx / ry) holds the value (0..255, 128 = centre; ly 0 = forward).
+// "3:r2+,4.5:r2-": hold a button from 3 s, release it at 4.5 s (charged attacks, sprinting with circle).
 // BB_PAD_LIVE=<file>: live steering of a running game; every complete line appended to the file is parsed like BB_PAD_SCRIPT with
 // the times relative to the moment the line is read (checked every poll; "0:ly=0,2:ly=128,3:cross" walks 2 s, then presses cross).
 // BB_PAD_CLOCK=flips: count the seconds as game flips / 30 instead of wall time, so a slowed-down run (low priority, busy PC) presses at the
 // same game state. ponytail: assumes the reference timing was taken at 30 flips/s (menus and loading screens run at 30 here).
 std::atomic<uint64_t> g_flips{0};
-void pad_note_flip() { ++g_flips; }
-struct ScriptedPress { double at; uint32_t bits; bool done; int axis = -1, value = 128; };  // axis 0 lx, 1 ly, 2 rx, 3 ry
+struct ScriptedPress { double at; uint32_t bits; bool done; int axis = -1, value = 128; };  // axis 0 lx, 1 ly, 2 rx, 3 ry, 4 hold (value 1) / release
 int g_script_axes[4] = {-1, -1, -1, -1};  // held script values (pad_snapshot only)
+uint32_t g_script_held = 0;                // buttons held by "name+" (pad_snapshot only)
 std::atomic<double> g_script_now{0};       // the script clock at the last poll
 double pad_script_clock() { return g_script_now; }
+void pad_note_flip() { ++g_flips; nav_flip(g_script_now); }
 void parse_script(std::string s, double base, std::vector<ScriptedPress>& out) {
     static const struct { const char* n; uint32_t b; } names[] = {{"up", kUp}, {"down", kDown}, {"left", kLeft}, {"right", kRight}, {"cross", kCross}, {"circle", kCircle},
-                                                                  {"square", kSquare}, {"triangle", kTriangle}, {"l1", kL1}, {"r1", kR1}, {"l2", kL2}, {"r2", kR2}, {"options", kOptions}};
+                                                                  {"square", kSquare}, {"triangle", kTriangle}, {"l1", kL1}, {"r1", kR1}, {"l2", kL2}, {"r2", kR2},
+                                                                  {"l3", kL3}, {"r3", kR3}, {"options", kOptions}};
     while (!s.empty()) {
         const size_t comma = s.find(',');
         const std::string item = s.substr(0, comma);
@@ -137,8 +141,12 @@ void parse_script(std::string s, double base, std::vector<ScriptedPress>& out) {
         const size_t colon = item.find(':');
         if (colon == std::string::npos) continue;
         const double at = base + std::atof(item.substr(0, colon).c_str());
-        for (const auto& n : names)
-            if (item.substr(colon + 1) == n.n) out.push_back({at, n.b, false});
+        for (const auto& n : names) {
+            const std::string v = item.substr(colon + 1);
+            if (v == n.n) out.push_back({at, n.b, false});
+            else if (v.size() == std::strlen(n.n) + 1 && v.compare(0, v.size() - 1, n.n) == 0 && (v.back() == '+' || v.back() == '-'))
+                out.push_back({at, n.b, false, 4, v.back() == '+'});
+        }
         static const char* const axes[4] = {"lx=", "ly=", "rx=", "ry="};
         for (int a = 0; a < 4; ++a)
             if (item.compare(colon + 1, 3, axes[a]) == 0) out.push_back({at, 0, false, a, std::atoi(item.c_str() + colon + 4)});
@@ -168,6 +176,7 @@ void poll_live(double now) {  // BB_PAD_LIVE (pad_snapshot only)
         consumed += long(nl + 1);
         std::string line = rest.substr(0, nl);
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (nav_command(line.c_str())) continue;  // goto / face / ... (nav.cpp logs and reports it)
         parse_script(line, now, pad_script());
         std::fprintf(stderr, "pad-live @%.2f: %s\n", now, line.c_str());
     }
@@ -184,10 +193,14 @@ PadSnapshot pad_snapshot() {
     std::lock_guard<std::mutex> lk(script_mutex);
     poll_live(now);
     for (auto& p : pad_script())
-        if (!p.done && now >= p.at && p.axis >= 0) { p.done = true; g_script_axes[p.axis] = std::clamp(p.value, 0, 255); }
+        if (!p.done && now >= p.at && p.axis >= 0) {
+            p.done = true;
+            if (p.axis == 4) g_script_held = p.value ? g_script_held | p.bits : g_script_held & ~p.bits;
+            else g_script_axes[p.axis] = std::clamp(p.value, 0, 255);
+        }
     for (auto& p : pad_script())
         if (!p.done && now >= p.at && p.axis < 0) { p.done = true; g_pending |= p.bits; break; }  // one press per poll
-    s.buttons = g_pad_buttons | g_key_buttons | g_pending.exchange(0);
+    s.buttons = g_pad_buttons | g_key_buttons | g_script_held | g_pending.exchange(0);
     const uint32_t k = g_key_axes;
     auto axis = [&](int pad_axis, int neg_bit, int pos_bit) {
         const int v = g_pad_axes[pad_axis];
@@ -208,6 +221,7 @@ PadSnapshot pad_snapshot() {
     if (s.r2 > 30) s.buttons |= kR2;
     if (s.buttons & kL2 && !s.l2) s.l2 = 255;
     if (s.buttons & kR2 && !s.r2) s.r2 = 255;
+    nav_apply(s, now);
     return s;
 }
 

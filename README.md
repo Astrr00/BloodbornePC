@@ -75,6 +75,11 @@ libraries and unit tests. It does not build the game (`bbgame`), which needs you
   of 1920×1080, including post-processing and HUD; shadow maps, cube and small effect targets stay native. Needs 148 bytes of push
   constants (otherwise factor 1). Use with `BB_WINDOW=3840x2160` or fullscreen. On an RTX 3070 Ti this costs ≈ 28.5 ms GPU per frame
   (30 fps, no room for interpolated frames); 1080p internal with FSR to 4K output costs ≈ 0.45 ms.
+- Scripted play (testing): `BB_TELEMETRY=<file>` writes ~4 lines/s `T t= f= st=play|menu|load cam=x,y,z yaw= pitch= pos=x,y,z hp=cur/max`
+  (`pos` = player feet, world coordinates; `menu` = a camera but not near the player, e.g. the title) plus `E t= <id> start|done|stuck|fail ...` per command. Commands, as lines appended to the
+  `BB_PAD_LIVE` file or listed in a `BB_ROUTE=<file>` (run in order, `#` comments): `goto <x> <z> [tol] [sprint]` (closed-loop run
+  relative to the camera; < 0.3 m progress in 1 s = `stuck`: back off, side-step, retry; `fail stuck` after 6), `face <x> <z>`,
+  `wait_load`, `wait <s>`, `press <button>`. `BB_ROUTE_REC=<file>[,<metres>]` appends `goto x z` every 3 m walked (a reusable route).
 
 ## Tools
 
