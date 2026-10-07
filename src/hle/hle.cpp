@@ -177,6 +177,7 @@ void register_all() {
     register_savedata();
     register_ajm();
     register_ime();
+    register_avplayer();
 }
 
 } // namespace bb::hle

@@ -226,9 +226,10 @@ void k_getdirentries(Context& c) {  // (fd, buf, nbytes, int64* basep)
 }
 
 // ---- C stdio over the VFS ---------------------------------------------------------------------------------------------
-// A guest FILE* is a small low-arena block holding an index into the host FILE table.
+// A guest FILE* is a small low-arena block holding an index into the host FILE table. Index 0 is host stdout: the loader's zeroed
+// data cells _Stdout/_Stderr/_Stdin read as index 0, so the guest's standard streams go to the host log instead of the first fopen'd file.
 std::mutex g_file_mutex;
-std::vector<FILE*> g_files;
+std::vector<FILE*> g_files{stdout};
 
 FILE* host_file(Context& c, uint64_t guest) {
     if (!guest) return nullptr;
@@ -250,6 +251,7 @@ void c_fopen(Context& c) {  // (path, mode)
     ret(c, reinterpret_cast<uintptr_t>(blk) - c.base);
 }
 void c_fclose(Context& c) {
+    if (arg(c, 0) && rt::ld<uint64_t>(c, arg(c, 0)) == 0) return ret(c, 0);  // a standard stream (loader cell, not a heap block): keep it open
     FILE* f = host_file(c, arg(c, 0));
     if (!f) return ret(c, uint64_t(-1));
     std::fclose(f);
@@ -280,11 +282,39 @@ void c_fgets(Context& c) {  // (buf, n, FILE*)
 }
 void c_feof(Context& c) { FILE* f = host_file(c, arg(c, 0)); ret(c, f ? std::feof(f) != 0 : 1); }
 void c_fflush(Context& c) { FILE* f = host_file(c, arg(c, 0)); ret(c, f ? uint64_t(std::fflush(f)) : 0); }
+// Output: count (fprintf) / non-negative (fputs) on success, EOF (-1) without a stream.
+constexpr uint64_t kEof = uint64_t(-1);
+uint64_t put_text(FILE* f, const std::string& s) { return f && std::fwrite(s.data(), 1, s.size(), f) == s.size() ? s.size() : kEof; }
+void c_fputs(Context& c) { ret(c, put_text(host_file(c, arg(c, 1)), guest_string(c, arg(c, 0))) == kEof ? kEof : 0); }  // (s, FILE*)
+void c_fputc(Context& c) {  // (ch, FILE*) -> ch as unsigned char
+    const unsigned char ch = arg8(c, 0);
+    FILE* f = host_file(c, arg(c, 1));
+    ret(c, f && std::fputc(ch, f) != EOF ? ch : kEof);
+}
+void c_fprintf(Context& c) { ret(c, put_text(host_file(c, arg(c, 0)), format_variadic(c, 1))); }  // (FILE*, fmt, ...)
+void c_vfprintf(Context& c) { ret(c, put_text(host_file(c, arg(c, 0)), format_guest(c, arg(c, 1), arg(c, 2)))); }  // (FILE*, fmt, va_list)
+void c_puts(Context& c) { ret(c, put_text(stdout, guest_string(c, arg(c, 0)) + "\n") == kEof ? kEof : 0); }
+void c_putchar(Context& c) { ret(c, std::fputc(arg8(c, 0), stdout) != EOF ? arg8(c, 0) : kEof); }
+void c_perror(Context& c) {  // "s: message\n" to stderr; FreeBSD errno 1..34 match the host CRT's texts
+    const std::string s = arg(c, 0) ? guest_string(c, arg(c, 0)) : "";
+    std::fprintf(stderr, "%s%s%s\n", s.c_str(), s.empty() ? "" : ": ", std::strerror(*guest_errno()));
+}
 
 // POSIX stat: -1 with errno instead of the Orbis error code.
 void p_stat(Context& c) {
     k_stat(c);
     if (c.r[0]) { *guest_errno() = 2; c.r[0] = uint64_t(-1); }
+}
+// POSIX wrappers over the sceKernel* variants: Orbis kernel errors are 0x80020000 + errno.
+template <void (*K)(Context&)> void posix(Context& c) {
+    K(c);
+    if (c.r[0]) { *guest_errno() = int(c.r[0] & 0xFFFF); c.r[0] = uint64_t(-1); }
+}
+void p_remove(Context& c) {  // C remove(): a file, or an empty directory
+    auto host = vfs_resolve(guest_string(c, arg(c, 0)));
+    std::error_code ec;
+    if (host && fs::is_directory(*host, ec)) return posix<k_rmdir>(c);
+    posix<k_unlink>(c);
 }
 
 } // namespace
@@ -340,7 +370,18 @@ void register_vfs() {
     reg("fgets", c_fgets);
     reg("feof", c_feof);
     reg("fflush", c_fflush);
+    reg("fputs", c_fputs);
+    reg("fputc", c_fputc);
+    reg("fprintf", c_fprintf);
+    reg("vfprintf", c_vfprintf);
+    reg("puts", c_puts);
+    reg("putchar", c_putchar);
+    reg("perror", c_perror);
     reg("stat", p_stat);
+    reg("mkdir", posix<k_mkdir>);  // (path, mode)
+    reg("rmdir", posix<k_rmdir>);
+    reg("rename", posix<k_rename>);
+    reg("remove", p_remove);
 }
 
 } // namespace bb::hle

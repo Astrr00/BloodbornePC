@@ -828,6 +828,12 @@ void register_gnm() {
     reg("sceGnmSetLsShader", [](Context& c) { set_tess_shader(c, 1); });
     reg("sceGnmSetHsShader", [](Context& c) { set_tess_shader(c, 2); });
     for (const char* s : {"sceGnmSetEsShader", "sceGnmSetGsShader"}) reg(s, fill_reserved_nop);
+    // Update*Shader: same packet length as Set*; the context registers go into NOPs because the engine only calls them when those
+    // registers equal the bound shader's (f_10900a0 compares first). Emitting real SET_CONTEXT_REG with the same values is equivalent.
+    reg("sceGnmUpdatePsShader", set_ps_shader);
+    reg("sceGnmUpdateVsShader", set_vs_shader);
+    reg("sceGnmUpdateHsShader", [](Context& c) { set_tess_shader(c, 2); });
+    reg("sceGnmUpdateGsShader", fill_reserved_nop);
     reg("sceGnmSubmitCommandBuffers", [](Context& c) { submit_scan(c); ret(c, 0); });  // (count, dcb**, dcbSizes*, ccb**, ccbSizes*): PM4 interpreter comes with M2
     reg("sceGnmSubmitDone", gnm_zero);
     reg("sceGnmSubmitAndFlipCommandBuffers", [](Context& c) {  // (count, dcb**, dcbSz*, ccb**, ccbSz*, handle, bufIdx, mode, arg)

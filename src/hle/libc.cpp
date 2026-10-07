@@ -104,6 +104,8 @@ std::string format(VaReader& va, uint64_t fmt) {
     return out;
 }
 
+} // namespace
+
 // Variadic call: `fixed` integer arguments precede the va part; the save area mirrors the SysV prologue.
 std::string format_variadic(Context& c, int fmt_index) {
     uint8_t save[176];
@@ -114,8 +116,6 @@ std::string format_variadic(Context& c, int fmt_index) {
     VaReader va{c, {uint32_t(8 * (fmt_index + 1)), 48, c.r[4] + 8, uint64_t(reinterpret_cast<uintptr_t>(save)) - c.base}};
     return format(va, fmt);
 }
-
-} // namespace
 
 std::string format_guest(Context& c, uint64_t fmt, uint64_t va_list_addr) {
     VaReader va{c, rt::ld<GuestVaList>(c, va_list_addr)};

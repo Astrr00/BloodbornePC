@@ -62,6 +62,9 @@ public:
 private:
     void* handle_ = nullptr;
 };
+// Runs `body` on a new host thread as a guest thread: own TLS block (fs), guest stack (body gets rsp = its 16-byte aligned top),
+// ScePthread `handle` in its TCB (0: a fresh one). Library-internal threads use it to call guest callbacks like the console's do.
+bool start_guest_thread(HostThread& host, uint64_t stack_size, const char* debug_name, uint64_t handle, std::function<void(Context&)> body);
 
 // Library slices (one file each); register_all calls them all.
 void register_libc();
@@ -94,6 +97,7 @@ void register_services();
 void register_savedata();
 void register_ajm();
 void register_ime();
+void register_avplayer();
 void set_save_root(const std::string& dir);  // host directory holding all save data (<root>/<user>/<title>/<dir>)
 void register_all();
 
@@ -120,5 +124,7 @@ struct GuestVaList {
     uint64_t overflow_arg_area, reg_save_area;
 };
 std::string format_guest(Context& c, uint64_t fmt, uint64_t va_list_addr);
+// The same for a variadic call: the format string is integer argument `fmt_index`, the values follow it.
+std::string format_variadic(Context& c, int fmt_index);
 
 } // namespace bb::hle

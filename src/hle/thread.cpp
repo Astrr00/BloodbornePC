@@ -380,6 +380,51 @@ void rw_destroy(Context& c) {
     rt::st<uint64_t>(c, arg(c, 0), 0);
     ret(c, 0);
 }
+// Orbis try/timed variants: kErrBusy when not free now, kErrTimedOut after the relative timeout (u32 usec).
+void rw_tryrdlock(Context& c) {
+    RwLock* l = get_or_create<RwLock>(c, arg(c, 0));
+    if (!l) return ret(c, kErrInval);
+    std::lock_guard lk(l->m);
+    if (l->writer) return ret(c, kErrBusy);
+    ++l->readers;
+    ret(c, 0);
+}
+void rw_trywrlock(Context& c) {
+    RwLock* l = get_or_create<RwLock>(c, arg(c, 0));
+    if (!l) return ret(c, kErrInval);
+    std::lock_guard lk(l->m);
+    if (l->writer || l->readers) return ret(c, kErrBusy);
+    l->writer = true;
+    ret(c, 0);
+}
+void rw_timedrdlock(Context& c) {  // (rwlock, usec)
+    RwLock* l = get_or_create<RwLock>(c, arg(c, 0));
+    if (!l) return ret(c, kErrInval);
+    std::unique_lock lk(l->m);
+    if (!l->cv.wait_for(lk, std::chrono::microseconds(arg32(c, 1)), [&] { return !l->writer; })) return ret(c, kErrTimedOut);
+    ++l->readers;
+    ret(c, 0);
+}
+void rw_timedwrlock(Context& c) {  // (rwlock, usec)
+    RwLock* l = get_or_create<RwLock>(c, arg(c, 0));
+    if (!l) return ret(c, kErrInval);
+    std::unique_lock lk(l->m);
+    if (!l->cv.wait_for(lk, std::chrono::microseconds(arg32(c, 1)), [&] { return !l->writer && l->readers == 0; }))
+        return ret(c, kErrTimedOut);
+    l->writer = true;
+    ret(c, 0);
+}
+// ponytail: polls try_lock every 100 us (Mutex wraps a plain std::mutex); a timed_mutex if a hot path ever waits here.
+void mutex_timedlock(Context& c) {  // (mutex, usec)
+    Mutex* m = get_or_create<Mutex>(c, arg(c, 0));
+    if (!m) return ret(c, kErrInval);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(arg32(c, 1));
+    while (!m->try_lock()) {
+        if (std::chrono::steady_clock::now() >= until) return ret(c, kErrTimedOut);
+        precise_sleep_us(100);
+    }
+    ret(c, 0);
+}
 
 // ---- semaphores --------------------------------------------------------------------------------------------------
 void sema_create(Context& c) {  // (SceKernelSema* out, name, attr, initCount, maxCount, opt)
@@ -456,21 +501,14 @@ void attr_setstacksize(Context& c) { get<Attr>(c, rt::ld<uint64_t>(c, arg(c, 0))
 void attr_setdetach(Context& c) { get<Attr>(c, rt::ld<uint64_t>(c, arg(c, 0)))->detach = int(arg(c, 1)); ret(c, 0); }
 
 void thread_create(Context& c) {  // (ScePthread* out, const ScePthreadAttr* attr, entry, arg, name)
-    Process& p = process();
     const uint64_t attr_h = arg(c, 1) ? rt::ld<uint64_t>(c, arg(c, 1)) : 0;
     const uint64_t stack_size = attr_h ? get<Attr>(c, attr_h)->stack_size : 256 << 10;
-    const uint64_t tls_bytes = (rt::tls_block_size(*p.image) + 0xFFF) & ~uint64_t(0xFFF);
-    const uint64_t area = reinterpret_cast<uintptr_t>(host_map(nullptr, tls_bytes + stack_size));
-    if (!area) return ret(c, kErrNoMem);
-
     auto t = std::make_unique<GuestThread>();
     GuestThread* th = t.get();
     th->entry = arg(c, 2);
     th->arg = arg(c, 3);
     // The handle is a zeroed block, not the host object: guest code may read fields of its ScePthread.
     const uint64_t handle = new_thread_object();
-    const uint64_t stack_top = area + tls_bytes + stack_size;
-    const uint64_t tls_area = area;
     std::string name = arg(c, 4) ? ptr<const char>(c, arg(c, 4)) : "";
     char label[96];
     std::snprintf(label, sizeof label, "worker '%s' entry 0x%llx", name.c_str(),
@@ -481,19 +519,8 @@ void thread_create(Context& c) {  // (ScePthread* out, const ScePthreadAttr* att
         g_threads.emplace(handle, std::move(t));
     }
     rt::st<uint64_t>(c, arg(c, 0), handle);
-    const bool ok = th->host.start(kHostStack, [th, handle, stack_top, tls_area, debug_name] {
-        Context tc;
-        tc.base = 0;
-        std::string err;
-        if (!rt::build_tls_block(tc, *process().image, tls_area, process().canary, err)) {
-            std::fprintf(stderr, "bbrt: thread TLS setup failed: %s\n", err.c_str());
-            std::abort();
-        }
-        rt::current_context = &tc;
-        rt::register_debug_thread(debug_name, current_os_thread_id());
+    const bool ok = start_guest_thread(th->host, stack_size, debug_name, handle, [th](Context& tc) {
         th->tcb = tc.fs_base;
-        rt::st<uint64_t>(tc, tc.fs_base + rt::GuestTcb::kThread, handle);
-        tc.r[4] = stack_top & ~uint64_t(15);
         tc.r[4] -= 8;  // return address slot: rsp = 8 (mod 16) at entry
         rt::st<uint64_t>(tc, tc.r[4], 0);
         tc.r[7] = th->arg;
@@ -503,7 +530,6 @@ void thread_create(Context& c) {  // (ScePthread* out, const ScePthreadAttr* att
         } catch (const ThreadExit& e) {
             th->result = e.value;
         }
-        rt::unregister_debug_thread();
         th->done = true;
     });
     if (!ok) {
@@ -541,6 +567,28 @@ void thread_detach(Context& c) { ret(c, 0); }  // ponytail: detached threads are
 void sched_yield_(Context& c) { std::this_thread::yield(); ret(c, 0); }
 
 } // namespace
+
+bool start_guest_thread(HostThread& host, uint64_t stack_size, const char* debug_name, uint64_t handle, std::function<void(Context&)> body) {
+    const uint64_t tls_bytes = (rt::tls_block_size(*process().image) + 0xFFF) & ~uint64_t(0xFFF);
+    const uint64_t area = reinterpret_cast<uintptr_t>(host_map(nullptr, tls_bytes + stack_size));
+    if (!area) return false;
+    if (!handle) handle = new_thread_object();
+    return host.start(kHostStack, [=, body = std::move(body)] {
+        Context tc;
+        tc.base = 0;
+        std::string err;
+        if (!rt::build_tls_block(tc, *process().image, area, process().canary, err)) {
+            std::fprintf(stderr, "bbrt: thread TLS setup failed: %s\n", err.c_str());
+            std::abort();
+        }
+        rt::current_context = &tc;
+        rt::register_debug_thread(debug_name, current_os_thread_id());
+        rt::st<uint64_t>(tc, tc.fs_base + rt::GuestTcb::kThread, handle);
+        tc.r[4] = (area + tls_bytes + stack_size) & ~uint64_t(15);
+        body(tc);
+        rt::unregister_debug_thread();
+    });
+}
 
 void print_cond_waiters() {
     if (!cond_trace()) return;
@@ -581,6 +629,11 @@ void register_thread() {
         reg(p.sce, p.fn);
         reg(p.posix, p.fn);
     }
+    reg("scePthreadRwlockTryrdlock", rw_tryrdlock);
+    reg("scePthreadRwlockTrywrlock", rw_trywrlock);
+    reg("scePthreadRwlockTimedrdlock", rw_timedrdlock);
+    reg("scePthreadRwlockTimedwrlock", rw_timedwrlock);
+    reg("scePthreadMutexTimedlock", mutex_timedlock);
     // POSIX differs from the Orbis variants in two return conventions: errno values and absolute cond timeouts.
     reg("pthread_mutex_trylock", [](Context& c) { mutex_trylock(c); if (c.r[0]) c.r[0] = 16; });  // EBUSY
     reg("pthread_cond_timedwait", [](Context& c) {  // (cond, mutex, const timespec* abstime)

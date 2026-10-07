@@ -73,8 +73,21 @@ void register_np() {
                           "sceNpProfileDialogOpen", "sceNpProfileDialogGetResult", "sceNpProfileDialogUpdateStatus",
                           "sceNpCommerceDialogOpen", "sceNpCommerceDialogUpdateStatus", "sceVoiceCreatePort",
                           "sceVoiceGetPortInfo", "sceVoiceConnectIPortToOPort", "sceVoiceDisconnectIPortFromOPort",
-                          "sceVoiceReadFromOPort", "sceVoiceWriteToIPort", "sceNpWebApiUtilityParseNpId"})
+                          "sceVoiceReadFromOPort", "sceVoiceWriteToIPort", "sceNpWebApiUtilityParseNpId",
+                          "sceNpMatching2SignalingGetPingInfo", "sceNpMatching2SignalingGetConnectionStatus"})
         reg(n, np_fail);
+    // SceNpId: onlineId data[16] + term + dummy[3], opt[8], reserved[8]. 0 if equal, else SCE_NP_UTIL_ERROR_NOT_MATCH;
+    // NULL -> SCE_NP_ERROR_INVALID_ARGUMENT. sceNpCmpOnlineId compares only the 16-char id.
+    reg("sceNpCmpNpId", [](Context& c) {
+        if (!arg(c, 0) || !arg(c, 1)) return ret(c, uint64_t(int64_t(int32_t(0x80550003))));
+        const char *a = ptr<const char>(c, arg(c, 0)), *b = ptr<const char>(c, arg(c, 1));
+        const bool eq = !std::strncmp(a, b, 16) && !std::memcmp(a + 20, b + 20, 16);
+        ret(c, eq ? 0 : uint64_t(int64_t(int32_t(0x80550609))));
+    });
+    reg("sceNpCmpOnlineId", [](Context& c) {
+        if (!arg(c, 0) || !arg(c, 1)) return ret(c, uint64_t(int64_t(int32_t(0x80550003))));
+        ret(c, std::strncmp(ptr<const char>(c, arg(c, 0)), ptr<const char>(c, arg(c, 1)), 16) ? uint64_t(int64_t(int32_t(0x80550609))) : 0);
+    });
     reg("sceNpGetState", [](Context& c) { rt::st<int32_t>(c, arg(c, 1), 1); ret(c, 0); });  // arg0 = user id; 1 = signed out
     // The library reports the current state through the registered callback on the next sceNpCheckCallback (once; the state never changes).
     reg("sceNpRegisterStateCallback", [](Context& c) {  // (callback(userId, state, userArg), userArg)

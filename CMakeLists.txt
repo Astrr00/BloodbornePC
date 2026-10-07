@@ -69,11 +69,14 @@ add_library(bbrt STATIC src/runtime/guest.cpp src/runtime/loader.cpp src/runtime
 target_link_libraries(bbrt PUBLIC bbimage)
 
 # Host implementations of PS4 system libraries (HLE).
-add_library(bbhle STATIC src/hle/hle.cpp src/hle/libc.cpp src/hle/kernel.cpp src/hle/thread.cpp src/hle/libc_wrap.cpp src/hle/crash.cpp src/hle/system.cpp src/hle/guest_heap.cpp src/hle/net.cpp src/hle/np.cpp src/hle/audio.cpp src/hle/vfs.cpp src/hle/gnm.cpp src/hle/input.cpp src/hle/services.cpp src/hle/savedata.cpp src/hle/ajm.cpp src/hle/ime.cpp src/hle/sleep.cpp)
+add_library(bbhle STATIC src/hle/hle.cpp src/hle/libc.cpp src/hle/kernel.cpp src/hle/thread.cpp src/hle/libc_wrap.cpp src/hle/crash.cpp src/hle/system.cpp src/hle/guest_heap.cpp src/hle/net.cpp src/hle/np.cpp src/hle/audio.cpp src/hle/vfs.cpp src/hle/gnm.cpp src/hle/input.cpp src/hle/services.cpp src/hle/savedata.cpp src/hle/ajm.cpp src/hle/ime.cpp src/hle/sleep.cpp src/hle/avplayer.cpp)
 add_library(bbgcn STATIC src/gpu/gcn.cpp src/gpu/gcn_spirv.cpp)
 target_include_directories(bbgcn PUBLIC src)
 target_link_libraries(bbgcn PUBLIC SPIRV-Headers::SPIRV-Headers)
 target_link_libraries(bbhle PUBLIC bbrt bbgcn bbatrac9)
+if(WIN32)
+    target_link_libraries(bbhle PRIVATE mfplat mfreadwrite mfuuid ole32)  # AvPlayer movies: OS Media Foundation (H.264/AAC)
+endif()
 
 add_executable(bbinstall tools/bbinstall/main.cpp)
 target_link_libraries(bbinstall PRIVATE bbcore)
@@ -216,7 +219,7 @@ if(BB_EBOOT)
     FetchContent_Declare(vma GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git GIT_TAG v3.3.0 GIT_SHALLOW TRUE SOURCE_SUBDIR no_cmake)  # header-only: no add_subdirectory
     FetchContent_MakeAvailable(vma)
     add_library(bbgpu STATIC src/gpu/present.cpp src/gpu/vk_context.cpp src/gpu/backend.cpp src/gpu/pad.cpp src/gpu/nav.cpp src/gpu/audio_out.cpp src/gpu/write_watch.cpp)
-    option(BB_DEV_TOOLS "Dev cheats for testing in src/gpu/nav.cpp (BB_DEV_GODMODE, BB_DEV_TELEPORT, live 'tp'); never in a release" OFF)
+    option(BB_DEV_TOOLS "Dev cheats for testing in src/gpu/nav.cpp (BB_DEV_GODMODE, BB_DEV_NOHIT, BB_DEV_TELEPORT, live 'tp'); never in a release" OFF)
     set_source_files_properties(src/gpu/nav.cpp PROPERTIES COMPILE_DEFINITIONS BB_DEV_TOOLS=$<BOOL:${BB_DEV_TOOLS}>)
     target_include_directories(bbgpu PRIVATE ${vma_SOURCE_DIR}/include)
     target_include_directories(bbgpu PUBLIC src)

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // libc.prx functions that map directly onto host C functions (strings, wide strings, math, conversions).
 // wchar_t is 16-bit on Orbis (-fshort-wchar; guest text in memory is UTF-16), so wide-string helpers are written out.
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #ifndef _WIN32
@@ -63,6 +65,36 @@ W* w_rchr(const W* s, W ch) {
         if (!*s) return const_cast<W*>(r);
     }
 }
+// wcsspn / wcspbrk over 16-bit wide strings.
+uint64_t w_spn(const W* s, const W* set) {
+    uint64_t n = 0;
+    for (; s[n] && w_chr(set, s[n]); ++n) {}
+    return n;
+}
+W* w_pbrk(const W* s, const W* set) {
+    for (; *s; ++s)
+        if (w_chr(set, *s)) return const_cast<W*>(s);
+    return nullptr;
+}
+
+// struct tm is nine ints on Orbis and on the host CRT, so guest tm pointers are used directly. time_t is 64-bit.
+std::tm* tm_local(const int64_t* t, std::tm* out) {
+    const std::time_t tt = std::time_t(*t);
+#ifdef _WIN32
+    return localtime_s(out, &tt) ? nullptr : out;
+#else
+    return localtime_r(&tt, out);
+#endif
+}
+std::tm* tm_utc(const int64_t* t, std::tm* out) {
+    const std::time_t tt = std::time_t(*t);
+#ifdef _WIN32
+    return gmtime_s(out, &tt) ? nullptr : out;
+#else
+    return gmtime_r(&tt, out);
+#endif
+}
+thread_local std::tm t_tm;  // localtime/gmtime result buffer (per thread; guest addresses are host addresses)
 
 // Dinkumware ctype tables for the C locale (index -1..255; the returned pointer addresses entry 0).
 // Class bits (xctype.h): XD 0x01 UP 0x02 SP 0x04 PU 0x08 LO 0x10 DI 0x20 CN 0x40 BB 0x80.
@@ -141,6 +173,20 @@ void register_libc_wrapped() {
     reg("tolower", wrap<+[](int ch) { return std::tolower(ch); }>);
     reg("abs", wrap<+[](int v) { return v < 0 ? -v : v; }>);
     reg("labs", wrap<+[](int64_t v) { return v < 0 ? -v : v; }>);
+    reg("strpbrk", wrap<+[](const char* s, const char* set) { return const_cast<char*>(std::strpbrk(s, set)); }>);
+    reg("strspn", wrap<+[](const char* s, const char* set) -> uint64_t { return std::strspn(s, set); }>);
+    reg("strcspn", wrap<+[](const char* s, const char* set) -> uint64_t { return std::strcspn(s, set); }>);
+    reg("strcoll", wrap<+[](const char* a, const char* b) { return std::strcmp(a, b); }>);  // C locale: strcoll == strcmp
+    reg("strtok", wrap<+[](char* s, const char* delim) { return std::strtok(s, delim); }>);  // host per-thread state; guest addresses are host addresses
+    reg("strerror", wrap<+[](int e) -> const char* { return std::strerror(e); }>);  // errno 1..34 share their meaning between FreeBSD and the host CRT
+    reg("localtime_s", wrap<tm_local>);  // C11 Annex K order: (const time_t*, struct tm*) -> tm* or NULL
+    reg("localtime", wrap<+[](const int64_t* t) { return tm_local(t, &t_tm); }>);
+    reg("gmtime", wrap<+[](const int64_t* t) { return tm_utc(t, &t_tm); }>);
+    reg("mktime", wrap<+[](std::tm* tm) -> int64_t { return int64_t(std::mktime(tm)); }>);
+    reg("difftime", wrap<+[](int64_t a, int64_t b) { return double(a - b); }>);
+    // Dinkumware atomics (locale facet refcounts): (u32* p, u32 v, memory_order) -> old value; always seq_cst.
+    reg("_Atomic_fetch_add_4", wrap<+[](uint32_t* p, uint32_t v, int) { return std::atomic_ref<uint32_t>(*p).fetch_add(v); }>);
+    reg("_Atomic_fetch_sub_4", wrap<+[](uint32_t* p, uint32_t v, int) { return std::atomic_ref<uint32_t>(*p).fetch_sub(v); }>);
     // wide strings
     reg("wcschr", wrap<w_chr>);
     reg("wmemcmp", wrap<w_cmp>);
@@ -162,6 +208,8 @@ void register_libc_wrapped() {
     reg("wcsncpy", wrap<w_ncpy>);
     reg("wcscat", wrap<w_cat>);
     reg("wcsrchr", wrap<w_rchr>);
+    reg("wcsspn", wrap<w_spn>);
+    reg("wcspbrk", wrap<w_pbrk>);
     reg("_Getpctype", wrap<+[]() { return &ctables().type[1]; }>);
     reg("_Getptolower", wrap<+[]() { return &ctables().lower[1]; }>);
     reg("_Getptoupper", wrap<+[]() { return &ctables().upper[1]; }>);
@@ -182,6 +230,16 @@ void register_libc_wrapped() {
     reg("floorf", wrap<+[](float x) { return std::floor(x); }>);
     reg("ceilf", wrap<+[](float x) { return std::ceil(x); }>);
     reg("fabsf", wrap<+[](float x) { return std::fabs(x); }>);
+    reg("atan", wrap<+[](double x) { return std::atan(x); }>);
+    reg("asin", wrap<+[](double x) { return std::asin(x); }>);
+    reg("acos", wrap<+[](double x) { return std::acos(x); }>);
+    reg("tanhf", wrap<+[](float x) { return std::tanh(x); }>);
+    reg("exp2", wrap<+[](double x) { return std::exp2(x); }>);
+    reg("frexp", wrap<+[](double x, int* e) { return std::frexp(x, e); }>);
+    reg("frexpf", wrap<+[](float x, int* e) { return std::frexp(x, e); }>);
+    // Dinkumware internals behind coshf/sinhf: (x, y) -> y * cosh(x) / y * sinh(x).
+    reg("_FCosh", wrap<+[](float x, float y) { return y * std::cosh(x); }>);
+    reg("_FSinh", wrap<+[](float x, float y) { return y * std::sinh(x); }>);
     reg("sin", wrap<+[](double x) { return std::sin(x); }>);
     reg("cos", wrap<+[](double x) { return std::cos(x); }>);
     reg("tan", wrap<+[](double x) { return std::tan(x); }>);
@@ -208,9 +266,11 @@ void register_libc_wrapped() {
     reg("_Stof", wrap<dink_to_float<char, float>>);
     reg("_Stod", wrap<dink_to_float<char, double>>);
     reg("_Sin", wrap<d_sin>);
-    // Dinkumware C++ runtime: the iostream static-init constructors (the game prints nothing through iostreams) and the system locks.
+    // Dinkumware C++ runtime: the iostream static-init constructors/destructors (the game prints nothing through iostreams) and the system locks.
     reg("_ZNSt8ios_base4InitC1Ev", wrap<+[](void*) {}>);
     reg("_ZNSt6_WinitC1Ev", wrap<+[](void*) {}>);
+    reg("_ZNSt8ios_base4InitD1Ev", wrap<+[](void*) {}>);
+    reg("_ZNSt6_WinitD1Ev", wrap<+[](void*) {}>);
     reg("_Locksyslock", wrap<+[](int i) { syslock(i).lock(); }>);
     reg("_Unlocksyslock", wrap<+[](int i) { syslock(i).unlock(); }>);
 }

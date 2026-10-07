@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Small system services: Rtc (UTC only), Sysmodule, SaveData/Trophy initialisation (real storage comes with the save
 // system milestone).
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -148,6 +149,30 @@ void register_services() {
     reg("sceNpTrophyRegisterContext", ok);
     // (ctx, handle, trophyId, platinumId*): no trophy store; report "no platinum unlocked" (SCE_NP_TROPHY_INVALID_TROPHY_ID)
     reg("sceNpTrophyUnlockTrophy", [](Context& c) { if (arg(c, 3)) rt::st<int32_t>(c, arg(c, 3), -1); ret(c, 0); });
+    // (ctx, handle, SceNpTrophyGameDetails*, SceNpTrophyGameData*): no trophy store, so an empty trophy set. Details (0x4a0): size,
+    // numGroups, numTrophies, numPlatinum..numBronze, title[128], description[1024]; data (0x20): size, unlocked counts, percent.
+    // numTrophies = 0 makes the game's trophy-list job (f_2025ea0) skip sceNpTrophyGetTrophyInfo.
+    reg("sceNpTrophyGetGameInfo", [](Context& c) {
+        if (arg(c, 2)) std::memset(ptr<char>(c, arg(c, 2)) + 8, 0, 0x4a0 - 8);
+        if (arg(c, 3)) std::memset(ptr<char>(c, arg(c, 3)) + 8, 0, 0x20 - 8);
+        ret(c, 0);
+    });
+    reg("sceNpTrophyGetTrophyInfo", [](Context& c) { ret(c, uint64_t(int64_t(int32_t(0x8055160A)))); });  // SCE_NP_TROPHY_ERROR_INVALID_TROPHY_ID
+
+    // Message dialog: no system UI. Open logs the text and reports the dialog as dismissed at once (FINISHED); the game imports no
+    // sceMsgDialogGetResult, so the pressed button is never read. Status: NONE 0, INITIALIZED 1, RUNNING 2, FINISHED 3.
+    static std::atomic<int> msg_status{0};
+    reg("sceMsgDialogInitialize", [](Context& c) { msg_status = 1; ret(c, 0); });
+    reg("sceMsgDialogOpen", [](Context& c) {  // SceMsgDialogParam: base(0x30), size, mode (+0x38: 1 user msg), userMsgParam* (+0x40) -> msg (+8)
+        const uint64_t p = arg(c, 0);
+        const uint64_t um = p && rt::ld<int32_t>(c, p + 0x38) == 1 ? rt::ld<uint64_t>(c, p + 0x40) : 0;
+        const uint64_t msg = um ? rt::ld<uint64_t>(c, um + 8) : 0;
+        std::fprintf(stderr, "service: MsgDialogOpen mode %d '%s' -> dismissed\n", p ? rt::ld<int32_t>(c, p + 0x38) : -1, msg ? ptr<const char>(c, msg) : "");
+        msg_status = 3;
+        ret(c, 0);
+    });
+    reg("sceMsgDialogUpdateStatus", [](Context& c) { ret(c, uint64_t(msg_status.load())); });
+    reg("sceMsgDialogTerminate", [](Context& c) { msg_status = 0; ret(c, 0); });
 }
 
 } // namespace bb::hle

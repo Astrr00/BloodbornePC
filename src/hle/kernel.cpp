@@ -141,7 +141,14 @@ void register_kernel() {
     reg("sceKernelReadTsc", [](Context& c) { ret(c, steady_us() * 1600); });  // 1.6 GHz TSC like the console
     reg("sceKernelClockGettime", clock_gettime_);
     reg("sceKernelQueryMemoryProtection", query_protection);
+    // (addr, len, prot): guest memory is host RW already and the GPU reads any noted mapping, so nothing changes. The AvPlayer
+    // allocator (f_2912da0) asks for GPU access on blocks QueryMemoryProtection reports CPU-only. ponytail: the new protection is
+    // not recorded (later queries repeat the old one; the allocator then simply asks again).
+    reg("sceKernelMprotect", zero);
     reg("sceKernelUsleep", usleep_);
+    reg("usleep", usleep_);
+    reg("sleep", [](Context& c) { precise_sleep_us(uint64_t(arg32(c, 0)) * 1000000); ret(c, 0); });  // returns the unslept seconds: 0
+    reg("getpagesize", [](Context& c) { ret(c, 0x4000); });  // 16 KiB pages on Orbis
     reg("sceKernelGetProcessTime", process_time);
     reg("sceKernelGetProcessTimeCounter", process_time_counter);
     reg("sceKernelGetProcessTimeCounterFrequency", process_time_freq);
