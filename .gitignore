@@ -1,0 +1,16 @@
+build*/
+out/
+.vs/
+.vscode/
+__pycache__/
+# Never commit game data or generated code
+*.pkg
+eboot.bin
+*.prx
+*.sprx
+generated/
+graphify-out/
+# Never commit dumps, screenshots or saves from local runs
+*.ppm
+*.raw
+savedata/
