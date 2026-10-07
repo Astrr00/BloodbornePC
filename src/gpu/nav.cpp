@@ -26,14 +26,16 @@ namespace bb::gpu {
 namespace {
 
 const char* env(const char* k) { const char* v = std::getenv(k); return v && *v ? v : nullptr; }
-#if BB_DEV_TOOLS  // dev cheats for testing (CMake BB_DEV_TOOLS): BB_DEV_GODMODE=1 keeps HP at max, BB_DEV_TELEPORT=x,y,z once after a load
+#if BB_DEV_TOOLS  // dev cheats for testing (CMake BB_DEV_TOOLS): BB_DEV_GODMODE=1 keeps HP at max, BB_DEV_NOHIT=1 makes the player
+                  // unhittable and undying, BB_DEV_TELEPORT=x,y,z once after a load
 const bool g_god = env("BB_DEV_GODMODE") && env("BB_DEV_GODMODE")[0] == '1';
+const bool g_nohit = env("BB_DEV_NOHIT") && env("BB_DEV_NOHIT")[0] == '1';
 const char* const g_tp_once = env("BB_DEV_TELEPORT");
 #else
-constexpr bool g_god = false;
+constexpr bool g_god = false, g_nohit = false;
 constexpr const char* g_tp_once = nullptr;
 #endif
-const bool g_on = env("BB_TELEMETRY") || env("BB_PAD_LIVE") || env("BB_ROUTE") || env("BB_ROUTE_REC") || g_god || g_tp_once;
+const bool g_on = env("BB_TELEMETRY") || env("BB_PAD_LIVE") || env("BB_ROUTE") || env("BB_ROUTE_REC") || g_god || g_nohit || g_tp_once;
 
 bool peek(uint64_t a, void* out, size_t n) {  // guest read that tolerates unmapped addresses (host address = guest address)
     if (a < 0x10000) return false;
@@ -81,8 +83,9 @@ bool cam_pos(V3& c, V3& fwd, V3& right) {
 // + 0x60] = the player character (vtable 0x578f310; re-created on respawn). Position: [[[X+0x20]+0x1a0]+0xf8] = its physics proxy
 // (vtable 0x57a7940): rotation 3x4 at +0x40, position float3 at +0x70 (feet; writing it teleports, the game copies it into every
 // other position). HP: an object with vtable 0x5735810 and owner X at +8, inside or shortly after X (seen at X+0xdc0, +0x1080,
-// +0x2a800): int32 HP at +0xf8, max HP +0xfc (the game's source: the HUD and other copies follow writes). The vtable checks
-// reject another eboot / a half-built world.
+// +0x2a800): int32 HP at +0xf8, max HP +0xfc (the game's source: the HUD and other copies follow writes); uint16 debug flags at
+// +0x200 (4 NoDead, 8 NoDamage, 0x10 NoHit; the hit, damage and death code tests them next to the global GameData.AllNoDead/
+// AllNoDamage/AllNoHit bytes at 0x593e860..62). The vtable checks reject another eboot / a half-built world.
 uint64_t ld64(uint64_t a) { uint64_t v = 0; return peek(a, &v, 8) ? v : 0; }
 uint64_t player_chr() {
     const uint64_t m = ld64(0x593e848), x = ld64(m) == 0x57301f0 ? ld64(m + 0x60) : 0;
@@ -252,8 +255,9 @@ void nav_flip(double now) {
     static double tel_t = -1;
     std::lock_guard lk(g_m);
     if (!g_tel && env("BB_TELEMETRY")) g_tel = std::fopen(env("BB_TELEMETRY"), "w");
-    if (g_flip++ == 0 && (g_god || g_tp_once))
-        std::fprintf(stderr, "nav: DEV CHEAT ACTIVE:%s%s%s\n", g_god ? " godmode" : "", g_tp_once ? " teleport " : "", g_tp_once ? g_tp_once : "");
+    if (g_flip++ == 0 && (g_god || g_nohit || g_tp_once))
+        std::fprintf(stderr, "nav: DEV CHEAT ACTIVE:%s%s%s%s\n", g_god ? " godmode" : "", g_nohit ? " nohit" : "", g_tp_once ? " teleport " : "",
+                     g_tp_once ? g_tp_once : "");
     if (g_nvotes) {
         int best = 0;
         for (int i = 1; i < g_nvotes; ++i) if (g_votes[i].n > g_votes[best].n) best = i;
@@ -274,6 +278,7 @@ void nav_flip(double now) {
         settled = -1;
     }
     if (g_god && hp_ok && hp[0] > 0 && hp[0] < hp[1]) poke(hb + 0xf8, &hp[1], 4);  // ponytail: per flip; one hit above max HP still kills
+    if (uint16_t fl = 0; g_nohit && hb && peek(hb + 0x200, &fl, 2) && (fl & 0x1c) != 0x1c) fl |= 0x1c, poke(hb + 0x200, &fl, 2);  // NoDead|NoDamage|NoHit
 #endif
     if (rec && pos && cam) {
         if (!rec_any || std::hypot(p.x - rec_last.x, p.z - rec_last.z) >= rec_step) {
