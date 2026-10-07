@@ -235,6 +235,7 @@ struct ShaderEntry {
     uint64_t code_hash = 0;
     int kind = 0;  // 1: Gnm library "fill typed buffer with a constant" CS, 2: "copy typed buffer" CS (handled on images, see image_cs_op)
     uint32_t fail_uses = 0;  // lookups that hit this failed translation (see get_shader)
+    uint64_t fetch_seen = 0;  // last fetch-shader address other than tr.fetch_addr a draw used (logged once per address, see get_shader)
 };
 
 struct BoundShader {
@@ -2067,10 +2068,17 @@ void Backend::get_shader(ShStage st, const RegView& r, BoundShader& out) {
         for (size_t i = 0; i < out.words.size() && match; ++i)
             for (uint32_t k = 0; k < e->tr.resources[i].dwords; ++k)
                 if ((out.words[i][k] ^ e->tr.resources[i].words[k]) & shape_mask(e->tr.resources[i].type, k)) { match = false; break; }
-        if (match && e->tr.fetch_addr) {  // the inlined fetch shader must still be the same code (compared in place, as read_guest checks)
-            const uint64_t fa = e->tr.fetch_addr;
+        if (match && e->tr.fetch_addr) {  // the draw's own fetch shader (from its user data) must be the inlined code (compared in place, as read_guest checks)
+            const uint64_t fa = fetch_address(e->tr, user);
             const size_t fb = e->fetch_code.size() * 4;
             if (fa < 0x10000 || (fa & 3) || (hooks().mem_valid && !hooks().mem_valid(fa, fb)) || std::memcmp(reinterpret_cast<const void*>(fa), e->fetch_code.data(), fb) != 0) match = false;
+            if (fa != e->tr.fetch_addr && fa != e->fetch_seen) {  // (log key built only when the address changes)
+                e->fetch_seen = fa;
+                char msg[160];
+                std::snprintf(msg, sizeof msg, "fetch shader of %s at 0x%llx (translated with 0x%llx): %s", e->log_name.c_str(), (unsigned long long)fa,
+                              (unsigned long long)e->tr.fetch_addr, match ? "same code" : "different code");
+                log_once(std::string("fetch") + msg, msg);
+            }
         }
         if (!match) continue;
         out.e = e.get();
@@ -3049,8 +3057,12 @@ void Backend::draw(const RegView& r, const DrawCmd& d_in) {
     cur_tess_ds = 0;
     BoundShader& ps = bs_ps;
     get_shader(ShStage::PS, r, ps);
-    if (static const uint64_t skip_ps = std::getenv("BB_SKIP_PS") ? std::strtoull(std::getenv("BB_SKIP_PS"), nullptr, 16) : 0;
-        skip_ps && ((uint64_t(r.sh[kShPsLo + 1]) << 40) | (uint64_t(r.sh[kShPsLo]) << 8)) == skip_ps) { ++skipped, ++skip_by["skip_ps"]; return; }  // debug: A/B a single pixel shader
+    static const std::vector<uint64_t> skip_ps = [] {  // debug BB_SKIP_PS=<hex>[,<hex>...]: A/B pixel shaders (their draws are dropped)
+        std::vector<uint64_t> v;
+        if (const char* e = std::getenv("BB_SKIP_PS")) for (const char* c = e; *c;) { char* end = nullptr; v.push_back(std::strtoull(c, &end, 16)); if (end == c) break; c = *end == ',' ? end + 1 : end; }
+        return v;
+    }();
+    if (!skip_ps.empty() && std::find(skip_ps.begin(), skip_ps.end(), (uint64_t(r.sh[kShPsLo + 1]) << 40) | (uint64_t(r.sh[kShPsLo]) << 8)) != skip_ps.end()) { ++skipped, ++skip_by["skip_ps"]; return; }
     // Debug BB_RES_LOG=<hex vs address>[,<seconds>]: every 10 s (from <seconds>) for one frame, the inputs of each draw with that VS: user
     // registers, descriptor words, and per buffer a hash of the guest bytes (no readback, no flush). Time counts from the first draw.
     static const auto res_t0 = std::chrono::steady_clock::now();

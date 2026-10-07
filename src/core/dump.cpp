@@ -40,6 +40,7 @@ std::vector<std::optional<std::string>> hash_files(const std::vector<fs::path>& 
     unsigned n = std::max(1u, std::min<unsigned>(std::thread::hardware_concurrency(), unsigned(files.size())));
     std::vector<std::jthread> threads;
     for (unsigned t = 0; t < n; ++t) threads.emplace_back(worker);
+    threads.clear();  // join before `out` is returned (moved without NRVO)
     return out;
 }
 

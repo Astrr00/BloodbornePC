@@ -180,7 +180,12 @@ endif()
 # Shards are generated at build time into <build>/gen (never committed).
 set(BB_GAME_OPT "Od" CACHE STRING "optimisation for generated shards: O2 or Od")
 set(BB_SHARD_FUNCTIONS 2000 CACHE STRING "functions per generated shard")
-set(BB_NAMES "${CMAKE_CURRENT_SOURCE_DIR}/build/ps4_names.txt" CACHE FILEPATH "NID name list for bbrecomp --names")
+# Optional NID name list (e.g. from ps4libdoc; none is bundled): only adds import names to logs and stub reports.
+set(BB_NAMES "" CACHE FILEPATH "optional NID name list for bbrecomp --names")
+set(BB_NAMES_ARGS)
+if(BB_NAMES AND EXISTS "${BB_NAMES}")
+    set(BB_NAMES_ARGS --names ${BB_NAMES})
+endif()
 if(BB_EBOOT)
     set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
     set(GEN_STAMP ${GEN_DIR}/sources.cmake)
@@ -193,7 +198,7 @@ if(BB_EBOOT)
     set_source_files_properties(${BB_GENERATED_SOURCES} PROPERTIES GENERATED TRUE)
     add_custom_command(
         OUTPUT ${GEN_DIR}/emitted.stamp
-        COMMAND bbrecomp ${BB_EBOOT} --emit-dir ${GEN_DIR} ${BB_SHARD_FUNCTIONS} --names ${BB_NAMES}
+        COMMAND bbrecomp ${BB_EBOOT} --emit-dir ${GEN_DIR} ${BB_SHARD_FUNCTIONS} ${BB_NAMES_ARGS}
         COMMAND ${CMAKE_COMMAND} -E touch ${GEN_DIR}/emitted.stamp
         DEPENDS bbrecomp ${BB_EBOOT} BYPRODUCTS ${GEN_STAMP} ${BB_GENERATED_SOURCES} VERBATIM)
     add_custom_target(bbgen DEPENDS ${GEN_DIR}/emitted.stamp)

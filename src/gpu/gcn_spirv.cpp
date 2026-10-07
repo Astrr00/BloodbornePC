@@ -185,10 +185,39 @@ private:
     bool loop_cond(const Insn& in, const std::string& m, Id* taken);
     bool end_loop(const Insn& in, const std::string& m);
     bool break_loop(const Insn& in, const std::string& m, size_t target);
-    // forward scalar branch: region predicated, exec restored at the target; `els`: the else-region of an if/else (see s_branch), run
-    // with saved & !cond from `pc` on
-    struct Join { size_t pc; Id saved; bool kt; Id cond = 0; bool els = false; };
+    // Forward s_cbranch_scc0/1: a structured selection (SCC is wave-uniform, so the region really is skipped - scalar writes in it must not
+    // happen otherwise). `alt`: the not-taken path's first block (no else-region: an empty block placed when the selection closes); after an
+    // if/else switch (see s_branch) the then-path's deferred exit block. `syms`/`kts`: compile-time register knowledge on entry to the
+    // other path (then: at the branch; after the switch: at the end of the then-region).
+    struct Join { size_t pc; Id merge, alt; Sym syms[128]; std::map<unsigned, bool> kts; bool els = false; };
     std::vector<Join> joins_;
+    std::map<unsigned, bool> lane_kts() const {
+        std::map<unsigned, bool> m;
+        for (const auto& [s, l] : lm_) m[s] = l.kt;
+        return m;
+    }
+    static bool same_sym(const Sym& x, const Sym& y) {
+        return x.known == y.known && (!x.known || (x.v.kind == y.v.kind && x.v.a == y.v.a && x.v.b == y.v.b && x.v.add == y.v.add && x.v.mask == y.v.mask));
+    }
+    // End of one path: s_load results exist only symbolically; where the other path disagrees, the merge reads the register, so store it.
+    void flush_loads(const Sym* other) {
+        bool ok = true;
+        for (unsigned i = 0; i < 128; ++i)
+            if (sym_[i].known && sym_[i].v.kind == ScalarVal::LoadWord && !same_sym(sym_[i], other[i])) st(sgpr_var(i), load_word(sym_[i].v, Insn{}, &ok));
+    }
+    void close_join() {
+        Join j = std::move(joins_.back());
+        joins_.pop_back();
+        flush_loads(j.syms);
+        b.op0(Op::OpBranch, {j.merge});
+        b.place_label(j.alt);
+        std::swap(sym_, j.syms);
+        flush_loads(j.syms);
+        b.op0(Op::OpBranch, {j.merge});
+        b.place_label(j.merge);
+        for (unsigned i = 0; i < 128; ++i) if (!same_sym(sym_[i], j.syms[i])) sym_[i] = {};
+        for (auto& [s, l] : lm_) { auto it = j.kts.find(s); l.kt = l.kt && it != j.kts.end() && it->second; }
+    }
     std::string prev_mn_;
     bool ended_ = false, jumped_ = false, buf_type_done_ = false;
     std::vector<uint32_t> fetch_;  // inlined fetch-shader code (s_swappc_b64 s[0:1], s[0:1] convention)
@@ -1778,7 +1807,7 @@ bool Xlat::begin_loop() {
     std::sort(backs.begin(), backs.end(), [](size_t a, size_t c) { return a > c; });  // outermost (farthest back edge) first
     for (size_t back : backs) {
         if (!loops_.empty() && back > loops_.back().back_pc) return fail("loop crosses an enclosing loop");
-        if (!joins_.empty()) return fail("loop inside a predicated region");
+        if (!joins_.empty()) return fail("loop inside a scalar-branch region");
         if (!scc_) scc_ = b.local_var_init(B, b.c_bool(false));  // a back edge may test SCC set later in the body
         Loop l;
         l.back_pc = back;
@@ -1814,7 +1843,7 @@ bool Xlat::loop_cond(const Insn& in, const std::string& m, Id* taken) {
 
 bool Xlat::end_loop(const Insn& in, const std::string& m) {
     const Loop l = loops_.back();
-    if (!joins_.empty()) return fail("loop back edge inside a predicated region", &in);
+    if (!joins_.empty()) return fail("loop back edge inside a scalar-branch region", &in);
     // A register whose symbolic value changes in the body is only a problem if the body used that value symbolically (it would be wrong from the
     // second iteration on); otherwise it simply becomes unknown after the loop (e.g. data loaded at a loop-dependent offset into a former T# slot).
     std::bitset<128> changed;
@@ -1880,13 +1909,19 @@ bool Xlat::step(const Insn& in) {
                 return true;  // forward skip of exec-predicated work: executing it with exec=0 is a no-op
             if (m == "s_branch" && off >= 0) {
                 const size_t target = pc_ + in.len + size_t(off);
-                // if/else: a predicated then-region ending in a jump over the else-region. Skipping the else-region dropped it for the
-                // lanes that need it (a particle PS lost its default blend path: the clinic lamp glow came out green).
-                if (!ret_code_ && !joins_.empty() && joins_.back().pc == pc_ + in.len && joins_.back().cond && !joins_.back().els && target > joins_.back().pc &&
+                // if/else: a then-region ending in a jump over the else-region (the else-region runs iff the then-region did not; skipping it
+                // dropped a particle PS's default blend path - the clinic lamp glow came out green).
+                if (!ret_code_ && !joins_.empty() && joins_.back().pc == pc_ + in.len && !joins_.back().els && target > joins_.back().pc &&
                     (joins_.size() < 2 || joins_[joins_.size() - 2].pc >= target)) {
-                    const Join j = joins_.back();
-                    joins_.back() = {target, j.saved, j.kt};
-                    joins_.push_back({j.pc, j.saved, j.kt, j.cond, true});
+                    Join& j = joins_.back();
+                    const Id fix = b.label();
+                    b.op0(Op::OpBranch, {fix});
+                    b.place_label(j.alt);
+                    j.alt = fix; j.pc = target; j.els = true;
+                    std::swap(sym_, j.syms);  // the else-region starts from the branch state; the join keeps the then-state
+                    auto kts = lane_kts();
+                    for (auto& [s, l] : lm_) { auto it = j.kts.find(s); l.kt = it != j.kts.end() && it->second; }
+                    j.kts = std::move(kts);
                     return true;
                 }
                 skip_until_ = target;
@@ -1896,16 +1931,18 @@ bool Xlat::step(const Insn& in) {
                 // After a 64-bit logical op (the kill pattern) scc0 means "no lane left": the skipped code runs with exec=0 anyway.
                 if (m == "s_cbranch_scc0" && (prev_mn_ == "s_andn2_b64" || prev_mn_ == "s_and_b64")) return true;
                 if (!scc_) return fail("SCC read before any write", &in);
-                Lane& l = lane(kExec);
-                Id old = l.kt ? b.c_bool(true) : ld(l.var, B);
-                Id sv = b.local_var_init(B, b.c_bool(false));
-                st(sv, old);
                 Id taken = ld(scc_, B);
                 if (m == "s_cbranch_scc1") taken = op(Op::OpLogicalNot, B, {taken});  // run the region iff the branch is not taken
-                Id cv = b.local_var_init(B, b.c_bool(false));
-                st(cv, taken);
-                joins_.push_back({pc_ + in.len + size_t(off), sv, l.kt, cv});
-                wr_lane(kExec, op(Op::OpLogicalAnd, B, {old, taken}), false);
+                joins_.emplace_back();
+                Join& j = joins_.back();
+                j.pc = pc_ + in.len + size_t(off);
+                j.merge = b.label(); j.alt = b.label();
+                std::copy(std::begin(sym_), std::end(sym_), j.syms);
+                j.kts = lane_kts();
+                const Id then_l = b.label();
+                b.op0(Op::OpSelectionMerge, {j.merge, 0});
+                b.op0(Op::OpBranchConditional, {taken, then_l, j.alt});
+                b.place_label(then_l);
                 return true;
             }
             return fail("unsupported control flow", &in);
@@ -1913,8 +1950,10 @@ bool Xlat::step(const Insn& in) {
         case GcnFmt::SOP1:
             if (m == "s_swappc_b64") {  // call into the fetch shader whose address sits in the source pair (user data)
                 const unsigned src = in.w[0] & 0xFF;
-                if (ret_code_ || src >= 103 || !sym_[src].known || !sym_[src + 1].known) return fail("s_swappc_b64: call target is not a user-data pointer", &in);
-                const uint64_t addr = (uint64_t(eval_sval(sym_[src + 1].v)) << 32) | eval_sval(sym_[src].v);
+                const auto host = [&](unsigned s) { return sym_[s].known && sym_[s].v.kind != ScalarVal::LoadWord; };  // (evaluable per draw from user data alone)
+                if (ret_code_ || src >= 103 || !host(src) || !host(src + 1)) return fail("s_swappc_b64: call target is not a user-data pointer", &in);
+                T.fetch_lo = sym_[src].v; T.fetch_hi = sym_[src + 1].v;
+                const uint64_t addr = (uint64_t(eval_sval(T.fetch_hi)) << 32) | eval_sval(T.fetch_lo);
                 fetch_.assign(512, 0);
                 if (!env_.read_mem || !env_.read_mem(addr, fetch_.data(), 512)) return fail("fetch shader unreadable", &in);
                 T.fetch_addr = addr;
@@ -2074,11 +2113,7 @@ bool Xlat::run() {
         const Insn in = gcn::decode(code_ + pc_, n_ - pc_);
         if (in.fmt == GcnFmt::Invalid) { fail("undecodable instruction word " + std::to_string(code_[pc_])); break; }
         jumped_ = false;
-        while (!joins_.empty() && pc_ >= joins_.back().pc) {
-            Join j = joins_.back();
-            joins_.pop_back();
-            wr_lane(kExec, j.els ? op(Op::OpLogicalAnd, B, {ld(j.saved, B), op(Op::OpLogicalNot, B, {ld(j.cond, B)})}) : ld(j.saved, B), j.kt && !j.els);
-        }
+        while (!joins_.empty() && pc_ >= joins_.back().pc) close_join();
         if (!ret_code_ && pc_ >= skip_until_ && loop_heads_.count(pc_) && !begin_loop()) break;
         if (pc_ == probe_pc_ && probe_var_) {
             Id c[4];
@@ -2092,6 +2127,7 @@ bool Xlat::run() {
         if (!jumped_) pc_ += in.len;
     }
     if (err_.empty() && !ended_) fail("no s_endpgm");
+    while (err_.empty() && !joins_.empty()) close_join();  // s_endpgm inside a region: close the open selections
     if (!err_.empty()) return false;
     finish_tess();
     b.op0(Op::OpReturn, {});
@@ -2171,6 +2207,11 @@ uint32_t shape_mask(Resource::Type type, unsigned i) {
         case Resource::Sampler: return 0;
     }
     return 0;
+}
+
+uint64_t fetch_address(const Translation& t, const uint32_t user[16]) {
+    auto ev = [&](const ScalarVal& v) { return ((v.kind == ScalarVal::User ? user[v.a & 15] : v.a) + v.add) & v.mask; };  // (never LoadWord, see s_swappc_b64)
+    return uint64_t(ev(t.fetch_hi)) << 32 | ev(t.fetch_lo);
 }
 
 }  // namespace bb::gpu

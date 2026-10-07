@@ -95,8 +95,9 @@ struct Translation {
     uint32_t ps_attrs = 0;                   // bitmask of interpolated attribute slots read
     uint32_t ps_mrts = 0;                    // bitmask of exported MRTs
     bool ps_kill = false;                    // PS: the final export kills lanes whose EXEC bit is off (alpha test)
-    uint64_t fetch_addr = 0;                 // VS only: inlined fetch shader (0 = none); its code is part of the cache key
-    std::vector<uint32_t> fetch_code;
+    uint64_t fetch_addr = 0;                 // VS only: inlined fetch shader at translation time (0 = none)
+    ScalarVal fetch_lo, fetch_hi;            // its address as user data (a draw's own fetch shader: fetch_address)
+    std::vector<uint32_t> fetch_code;        // its code: part of the cache key (compared at the draw's fetch_address)
     std::string error;                       // non-empty: translation failed
     uint32_t tess_ls = 0;                    // copy of GcnEnv::tess_ls (part of the shader identity)
     uint32_t tess_ds_level = 0;              // copy of GcnEnv::tess_ds_level (0 = not a domain shader)
@@ -112,5 +113,8 @@ bool eval_resources(const Translation& t, const uint32_t user[16],
 // Bits of descriptor dword `i` that are baked into the SPIR-V (stride, formats, image type...). A live descriptor with
 // equal masked words can reuse the translation.
 uint32_t shape_mask(Resource::Type type, unsigned i);
+
+// Address of the fetch shader a draw with user data `user` calls (t.fetch_addr != 0).
+uint64_t fetch_address(const Translation& t, const uint32_t user[16]);
 
 }  // namespace bb::gpu

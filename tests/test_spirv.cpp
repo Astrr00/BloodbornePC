@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <iterator>
 #include <tuple>
@@ -89,6 +90,18 @@ int main() {
         Translation t = translate(c, 8, env);
         check("if/else", t);
         assert(find_op(t.spirv, spv::Op::OpConstant, [](const uint32_t* w) { return (w[0] >> 16) == 4 && w[3] == 0x40000000u; }));
+    }
+    {  // if/else, the then-region clobbers the else-region's s_load base: s_cmp_eq_i32 s0, s1; s_cbranch_scc0 ELSE; s_not_b32 s2, s0; s_branch END;
+       // ELSE: s_load_dwordx4 s[4:7], s[2:3], 0; END: v_mov_b32 v0, s4; exp mrt0. Both regions start from the branch state (the else-region
+       // failed with "s_load base pointer is not user-data derived"); s4 is read after the merge, so the else path stores its load result.
+        static uint32_t data[4] = {1, 2, 3, 4};
+        const uint32_t c[] = {0xBF000100, 0xBF840002, 0xBE820700, 0xBF820001, 0xC0820300, 0x7E000204, 0xF8001C0F, 0x00000000, 0xBF810000};
+        GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 4;
+        env.user[2] = uint32_t(uintptr_t(data)); env.user[3] = uint32_t(uint64_t(uintptr_t(data)) >> 32);
+        env.read_mem = [](uint64_t a, uint32_t* d, uint32_t n) { std::memcpy(d, reinterpret_cast<const void*>(a), n * 4); return true; };
+        Translation t = translate(c, 9, env);
+        check("if/else scalar state", t);
+        assert(t.loads.size() == 1 && t.resources.size() == 1 && t.resources[0].load_data);
     }
     {  // lane id: v_mbcnt_lo_u32_b32 v25, exec_lo, v25 + v_mbcnt_hi_u32_b32_e64 v25, exec_hi, 0, s0
         const uint32_t c[] = {0x4632327E, 0xD2480019, 0x0001007F, 0xBF810000};

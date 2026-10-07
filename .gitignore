@@ -13,4 +13,6 @@ graphify-out/
 # Never commit dumps, screenshots or saves from local runs
 *.ppm
 *.raw
-savedata/
+savedata*/
+*.log
+dump*/
