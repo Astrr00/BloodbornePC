@@ -146,6 +146,8 @@ void register_services() {
     reg("sceNpTrophyCreateContext", [](Context& c) { rt::st<int32_t>(c, arg(c, 0), 1); ret(c, 0); });  // (ctx*, userId, label, opts)
     reg("sceNpTrophyCreateHandle", [](Context& c) { rt::st<int32_t>(c, arg(c, 0), 1); ret(c, 0); });
     reg("sceNpTrophyRegisterContext", ok);
+    // (ctx, handle, trophyId, platinumId*): no trophy store; report "no platinum unlocked" (SCE_NP_TROPHY_INVALID_TROPHY_ID)
+    reg("sceNpTrophyUnlockTrophy", [](Context& c) { if (arg(c, 3)) rt::st<int32_t>(c, arg(c, 3), -1); ret(c, 0); });
 }
 
 } // namespace bb::hle
