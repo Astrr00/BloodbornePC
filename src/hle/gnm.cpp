@@ -125,7 +125,8 @@ void note_shader(Context& c, const char* kind, uint64_t a, const RegState& r) {
     gpu::GcnEnv env;
     const bool is_ps = kind[0] == 'p', is_cs = kind[0] == 'c';
     env.stage = is_ps ? gpu::ShStage::PS : is_cs ? gpu::ShStage::CS : gpu::ShStage::VS;
-    const uint32_t ud = is_cs ? 0x240 : is_ps ? 0x0C : 0x4C, rsrc2 = r.sh[is_cs ? 0x213 : is_ps ? 0x0B : 0x4B];
+    const bool is_hs = kind[0] == 'h', is_ls = kind[0] == 'l';  // HS / LS: their own SH register blocks (0x108 / 0x148 + 0x0B / 0x0C), not the VS's
+    const uint32_t ud = is_cs ? 0x240 : is_ps ? 0x0C : is_hs ? 0x10C : is_ls ? 0x14C : 0x4C, rsrc2 = r.sh[is_cs ? 0x213 : is_ps ? 0x0B : is_hs ? 0x10B : is_ls ? 0x14B : 0x4B];
     env.user_sgprs = (rsrc2 >> 1) & 0x1F;
     for (int i = 0; i < 16; ++i) env.user[i] = r.sh[ud + i];
     env.ps_input_addr = r.context[0x1B4];
@@ -135,7 +136,7 @@ void note_shader(Context& c, const char* kind, uint64_t a, const RegState& r) {
     for (int i = 0; i < 3; ++i) env.cs_local[i] = r.sh[0x207 + i];
     std::vector<std::pair<uint64_t, std::vector<uint32_t>>> reads;  // guest memory the translation read (s_load, fetch shader)
     env.read_mem = [&c, &reads](uint64_t addr, uint32_t* dst, uint32_t n) {
-        if (addr < 0x10000) return false;
+        if (addr < 0x10000 || (gpu::hooks().mem_valid && !gpu::hooks().mem_valid(addr, uint64_t(n) * 4))) return false;  // (garbage user data: an HS/LS read through the wrong registers crashed here)
         std::memcpy(dst, ptr<const uint32_t>(c, addr), size_t(n) * 4);
         reads.emplace_back(addr, std::vector<uint32_t>(dst, dst + n));
         return true;

@@ -4145,6 +4145,7 @@ bool Backend::tess_begin(const RegView& r, const DrawCmd& in, DrawCmd& out, uint
     size_t off = 0;
     // Large LDS (> kCpuZero) lives in a device-local buffer of the slot, not in the host-visible ring: the LS writes it, the DS reads it back
     // (over PCIe the LS passes were ~5 ms each, GPU 80+ ms per frame in the Forbidden Woods). Small ones stay in the ring (CPU-zeroed).
+    if (size_t(count) * 128 > lds_bytes) return false;  // the LS writes a 128-byte record per control point: beyond the (16 MB) LDS it would overrun the buffer
     const bool dev_lds = lds_bytes > kCpuZero;
     uint8_t* p = ring_alloc(idx_bytes + (dev_lds ? 0 : lds_bytes), 256, off);  // one allocation: a second one could flush and move the first to the other slot
     if (!p) return false;
