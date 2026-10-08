@@ -670,9 +670,50 @@ bool Xlat::salu(const Insn& in, const std::string& m) {
             Id res = glsl(is_signed ? I : U, is_signed ? (is_min ? GLSLstd450SMin : GLSLstd450SMax) : (is_min ? GLSLstd450UMin : GLSLstd450UMax), {aa, cc});
             wr_s(dst, is_signed ? bits(res) : res);
             return true;
-        } else if (m == "s_bfe_u32") {  // offset = c[4:0], width = c[22:16]
+        } else if (m == "s_bfe_u32" || m == "s_bfe_i32") {  // offset = c[4:0], width = c[22:16] (0..127); width 0 -> 0, width >= 32 -> everything above offset
+            const bool sg = m == "s_bfe_i32";                // ponytail: SCC (result != 0) is not produced
             Id off = op(Op::OpBitwiseAnd, U, {c, cu(31)}), wid = op(Op::OpBitwiseAnd, U, {op(Op::OpShiftRightLogical, U, {c, cu(16)}), cu(0x7F)});
-            wr_s(dst, op(Op::OpBitFieldUExtract, U, {a, off, wid}));
+            Id sh = op(sg ? Op::OpShiftRightArithmetic : Op::OpShiftRightLogical, U, {a, off});  // arithmetic: bits past bit 31 replicate the sign
+            Id wide = op(Op::OpUGreaterThanEqual, B, {wid, cu(32)}), w31 = op(Op::OpBitwiseAnd, U, {wid, cu(31)});
+            Id res;
+            if (sg) {  // sign-extend from bit width-1: (sh << (32-w)) >>a (32-w); w = 0 -> 0
+                Id k = op(Op::OpBitwiseAnd, U, {op(Op::OpISub, U, {cu(32), wid}), cu(31)});
+                Id ext = op(Op::OpShiftRightArithmetic, U, {op(Op::OpShiftLeftLogical, U, {sh, k}), k});
+                res = op(Op::OpSelect, U, {op(Op::OpIEqual, B, {wid, cu(0)}), cu(0), op(Op::OpSelect, U, {wide, sh, ext})});
+            } else {
+                Id mask = op(Op::OpSelect, U, {wide, cu(~0u), op(Op::OpISub, U, {op(Op::OpShiftLeftLogical, U, {cu(1), w31}), cu(1)})});
+                res = op(Op::OpBitwiseAnd, U, {sh, mask});
+            }
+            wr_s(dst, res);
+            return true;
+        } else if (m == "s_bfm_b32") {  // ((1 << a[4:0]) - 1) << c[4:0]
+            Id msk = op(Op::OpISub, U, {op(Op::OpShiftLeftLogical, U, {cu(1), op(Op::OpBitwiseAnd, U, {a, cu(31)})}), cu(1)});
+            wr_s(dst, op(Op::OpShiftLeftLogical, U, {msk, op(Op::OpBitwiseAnd, U, {c, cu(31)})}));
+            return true;
+        } else if (m == "s_orn2_b32") { o = Op::OpBitwiseOr; c = op(Op::OpNot, U, {c}); }
+        else if (m == "s_nand_b32" || m == "s_nor_b32" || m == "s_xnor_b32") {
+            wr_s(dst, op(Op::OpNot, U, {op(m == "s_nand_b32" ? Op::OpBitwiseAnd : m == "s_nor_b32" ? Op::OpBitwiseOr : Op::OpBitwiseXor, U, {a, c})}));
+            return true;
+        } else if (m == "s_absdiff_i32") {
+            wr_s(dst, bits(glsl(I, GLSLstd450SAbs, {op(Op::OpBitcast, I, {op(Op::OpISub, U, {a, c})})})));
+            return true;
+        } else if (m == "s_abs_i32") {
+            wr_s(dst, bits(glsl(I, GLSLstd450SAbs, {op(Op::OpBitcast, I, {a})})));
+            return true;
+        } else if (m == "s_brev_b32") { wr_s(dst, op(Op::OpBitReverse, U, {a})); return true; }
+        else if (m == "s_bcnt1_i32_b32" || m == "s_bcnt0_i32_b32") {
+            wr_s(dst, op(Op::OpBitCount, U, {m == "s_bcnt0_i32_b32" ? op(Op::OpNot, U, {a}) : a}));
+            return true;
+        } else if (m == "s_ff1_i32_b32" || m == "s_ff0_i32_b32") {  // lowest set (clear) bit, -1 if none (FindILsb(0) = -1)
+            wr_s(dst, glsl(U, GLSLstd450FindILsb, {m == "s_ff0_i32_b32" ? op(Op::OpNot, U, {a}) : a}));
+            return true;
+        } else if (m == "s_flbit_i32_b32" || m == "s_flbit_i32") {  // leading zeros (b32) / leading sign copies (i32) counted from bit 31; -1 if none
+            Id msb = glsl(U, m == "s_flbit_i32" ? GLSLstd450FindSMsb : GLSLstd450FindUMsb, {a});
+            wr_s(dst, op(Op::OpSelect, U, {op(Op::OpIEqual, B, {msb, cu(~0u)}), cu(~0u), op(Op::OpISub, U, {cu(31), msb})}));
+            return true;
+        } else if (m == "s_sext_i32_i8" || m == "s_sext_i32_i16") {
+            const uint32_t k = m == "s_sext_i32_i8" ? 24 : 16;
+            wr_s(dst, op(Op::OpShiftRightArithmetic, U, {op(Op::OpShiftLeftLogical, U, {a, cu(k)}), cu(k)}));
             return true;
         } else if (m == "s_cselect_b32") {
             if (!scc_) return fail("s_cselect_b32 without SCC", &in);

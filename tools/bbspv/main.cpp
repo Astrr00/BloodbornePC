@@ -3,7 +3,7 @@
 // Usage: bbspv [-d] file.spv...                                  exit 0 iff all files validate against Vulkan 1.2.
 //        bbspv --tess-ls [--user-sgprs n] [--fetch-stub] [-d] f   translate f as an LS (one invocation per control point)
 //        bbspv --tess-ds N [--user-sgprs n] [-d] f                translate f as a DS (vertex pass, N x N cells per patch)
-//        bbspv --replay [-d] f.bin...                             translate f.bin with the environment and guest memory recorded in f.env
+//        bbspv --replay [-d] [--write-spv] f.bin...               translate f.bin with the environment and guest memory recorded in f.env
 // The shader code length comes from the OrbShdr trailer; user data is zero, guest memory is unreadable unless
 // --fetch-stub serves a one-instruction fetch shader (a real fetch shader lives in guest memory, not in the dump). --replay takes both
 // from the .env file BB_SHADER_DIR writes next to each dump (see note_shader).
@@ -71,13 +71,14 @@ static bool load_env(const std::string& path, gpu::GcnEnv& env, Replay& rp) {
 
 int main(int argc, char** argv) {
     tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& p, const char* m) { std::fprintf(stderr, "  %zu: %s\n", p.index, m); });
-    bool dis = false, fetch_stub = false;
+    bool dis = false, fetch_stub = false, write_spv = false;
     int bad = 0, ds_level = 0, translate = 0;
     unsigned user_sgprs = 16;
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (!std::strcmp(a, "-d")) { dis = true; continue; }
         if (!std::strcmp(a, "--fetch-stub")) { fetch_stub = true; continue; }
+        if (!std::strcmp(a, "--write-spv")) { write_spv = true; continue; }
         if (!std::strcmp(a, "--tess-ls")) { translate = 1; continue; }
         if (!std::strcmp(a, "--replay")) { translate = 3; continue; }
         if (!std::strcmp(a, "--tess-ds") && i + 1 < argc) { translate = 2; ds_level = std::atoi(argv[++i]); continue; }
@@ -109,6 +110,10 @@ int main(int argc, char** argv) {
             };
         }
         gpu::Translation t = gpu::translate(w.data(), si.code_bytes / 4, env);
+        if (write_spv && t.error.empty()) {  // <f>.new.spv beside the dump, to diff translator versions word by word
+            const std::string sp = std::string(a).substr(0, std::string(a).rfind('.')) + ".new.spv";
+            if (FILE* f = std::fopen(sp.c_str(), "wb")) { std::fwrite(t.spirv.data(), 4, t.spirv.size(), f); std::fclose(f); }
+        }
         if (!report(a, t.spirv, t.error, dis)) ++bad;
     }
     return bad ? 1 : 0;

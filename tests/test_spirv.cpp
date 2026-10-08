@@ -78,6 +78,34 @@ int main() {
         check("store", u);
         assert(u.resources.size() == 1 && !u.resources[0].scalar);
     }
+    {  // s_bfe_{u,i}32 s2, s0, literal: width 0, width 32, offset+width > 32, negative sign extension; then v_mov_b32 v0, s2; exp mrt0. Must translate and validate
+        const uint32_t lits[] = {0x00000004, 0x00200000, 0x00200010, 0x00100014, 0x00080004, 0x00180000, 0x007F001F, 0x00010000};
+        for (uint32_t opc : {0x27u, 0x28u}) {
+            for (uint32_t lit : lits) {
+                const uint32_t c[] = {0x80000000u | opc << 23 | 2u << 16 | 0xFFu << 8, lit, 0x7E000202, 0xF8001C0F, 0x00000000, 0xBF810000};
+                GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+                check("s_bfe", translate(c, 6, env));
+            }
+            const uint32_t r[] = {0x80000000u | opc << 23 | 2u << 16 | 1u << 8, 0x7E000202, 0xF8001C0F, 0x00000000, 0xBF810000};  // s2 = bfe(s0, s1)
+            GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+            check("s_bfe regs", translate(r, 5, env));
+        }
+        const uint32_t b64[] = {0x80000000u | 0x29u << 23 | 2u << 16 | 0xFFu << 8, 0x00080004, 0xBF810000};  // s_bfe_u64 stays unsupported, reported
+        GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+        assert(!translate(b64, 3, env).error.empty());
+    }
+    {  // sibling scalar bit ops: SOP2 s2 = op(s0, s1), SOP1 s2 = op(s0)
+        for (uint32_t opc : {0x24u, 0x16u, 0x18u, 0x1Au, 0x1Cu, 0x2Cu}) {  // bfm, orn2, nand, nor, xnor, absdiff
+            const uint32_t c[] = {0x80000000u | opc << 23 | 2u << 16 | 1u << 8, 0x7E000202, 0xF8001C0F, 0x00000000, 0xBF810000};
+            GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+            check("sop2 bit ops", translate(c, 5, env));
+        }
+        for (uint32_t opc : {0xBu, 0xDu, 0xFu, 0x11u, 0x13u, 0x15u, 0x17u, 0x19u, 0x1Au, 0x34u}) {  // brev, bcnt0/1, ff0/1, flbit, sext i8/i16, abs
+            const uint32_t c[] = {0xBE800000u | 2u << 16 | opc << 8, 0x7E000202, 0xF8001C0F, 0x00000000, 0xBF810000};
+            GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+            check("sop1 bit ops", translate(c, 5, env));
+        }
+    }
     {  // unsupported input is reported, not silently mistranslated
         const uint32_t bad[] = {0xBF850001, 0xBF810000, 0xBF810000};  // s_cbranch_scc1 +1 (needs real control flow)
         GcnEnv env; env.stage = ShStage::CS;
