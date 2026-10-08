@@ -291,6 +291,25 @@ void c_fputc(Context& c) {  // (ch, FILE*) -> ch as unsigned char
     FILE* f = host_file(c, arg(c, 1));
     ret(c, f && std::fputc(ch, f) != EOF ? ch : kEof);
 }
+void c_fgetc(Context& c) {  // (FILE*) -> next byte as unsigned char, EOF at end/without a stream; also getc
+    FILE* f = host_file(c, arg(c, 0));
+    const int ch = f ? std::fgetc(f) : EOF;
+    ret(c, ch == EOF ? kEof : uint64_t(ch));
+}
+void c_ungetc(Context& c) {  // (ch, FILE*)
+    FILE* f = host_file(c, arg(c, 1));
+    const int ch = int(arg32(c, 0));
+    ret(c, f && ch != EOF && std::ungetc(ch, f) != EOF ? uint64_t(uint8_t(ch)) : kEof);
+}
+void c_fgetpos(Context& c) {  // (FILE*, fpos_t*): the Orbis fpos_t is an int64 offset
+    FILE* f = host_file(c, arg(c, 0));
+    const int64_t p = f ? int64_t(bb_ftell(f)) : -1;
+    if (p < 0) return ret(c, uint64_t(-1));
+    *ptr<int64_t>(c, arg(c, 1)) = p;
+    ret(c, 0);
+}
+void c_clearerr(Context& c) { if (FILE* f = host_file(c, arg(c, 0))) std::clearerr(f); }
+void c_ferror(Context& c) { FILE* f = host_file(c, arg(c, 0)); ret(c, f && std::ferror(f) != 0); }
 void c_fprintf(Context& c) { ret(c, put_text(host_file(c, arg(c, 0)), format_variadic(c, 1))); }  // (FILE*, fmt, ...)
 void c_vfprintf(Context& c) { ret(c, put_text(host_file(c, arg(c, 0)), format_guest(c, arg(c, 1), arg(c, 2)))); }  // (FILE*, fmt, va_list)
 void c_puts(Context& c) { ret(c, put_text(stdout, guest_string(c, arg(c, 0)) + "\n") == kEof ? kEof : 0); }
@@ -372,6 +391,13 @@ void register_vfs() {
     reg("fflush", c_fflush);
     reg("fputs", c_fputs);
     reg("fputc", c_fputc);
+    reg("fgetc", c_fgetc);
+    reg("getc", c_fgetc);
+    reg("ungetc", c_ungetc);
+    reg("fgetpos", c_fgetpos);
+    reg("clearerr", c_clearerr);
+    reg("ferror", c_ferror);
+    reg("setvbuf", [](Context& c) { ret(c, 0); });  // ponytail: the host stream keeps its own buffering
     reg("fprintf", c_fprintf);
     reg("vfprintf", c_vfprintf);
     reg("puts", c_puts);
