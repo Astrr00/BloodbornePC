@@ -86,6 +86,9 @@ libraries and unit tests. It does not build the game (`bbgame`), which needs you
   `BB_INTERP_WARP_CELL=<px>` grid cell (default 2); the presenter uses a second, higher-priority queue if the queue family has one,
   `BB_PRESENT_QUEUE=0` disables it. `BB_WINDOW=3840x2160`, F11 = fullscreen, `BB_SAVE_DIR=<folder>` (saves), `BB_STUB_IMPORTS=1`
   (missing imports as stubs).
+- Cheats: `BB_CHEATS=god,nohit,stamina` (comma list): `god` refills HP every frame, `nohit` takes no damage, stagger or fall death, `stamina` uses no
+  stamina. Applies to the EU 1.00 build only: the player's memory layout is checked at run time, and on any other build the game logs
+  `cheats: <name> unavailable on this build` and writes nothing.
 - Upscaling: if the window is larger than the game image (1920×1080), the presenter upscales with AMD FSR 1 (EASU + RCAS);
   `BB_UPSCALE=linear` = bilinear, `BB_FSR_SHARP=<stops>` (0 = sharpest, default 0.2). `BB_SHOT_OUT=1`: screenshots (`BB_SHOT_AT`) show the
   presented image at window size instead of the game image. Diagnostics for internal scaling: `BB_SCALE_LOG=<s>` logs one frame from
@@ -112,6 +115,28 @@ libraries and unit tests. It does not build the game (`bbgame`), which needs you
   - `BB_ROUTE_REC=<file>[,<metres>]` records the walk as a reusable route: a point every 3 m, loops and backtracking (fights, searching)
     cut, simplified; the file is rewritten after every point.
 
+## Launcher
+
+`bblauncher` (built by default, SDL3 + Dear ImGui; mouse, keyboard and gamepad: D-pad/stick, A = select, B = back, L1/R1 = tabs) is the
+front end for the game: **Games** (add a dump folder and optionally the DLC folder: validated with the same checks as `bbinstall`, then installed or used in
+place), **Settings** (frame rate, window mode and size, internal resolution, upscaler, sharpness, interpolation, save folder, missing imports)
+and **Cheats** (`god`, `nohit`, `stamina`; they only work on builds whose memory layout is known, currently EU 1.00). **Play** starts the matching `bbgame`
+and keeps its output in `game.log`; on a failed run the last lines are shown.
+
+- `bbgame` is recompiled from one specific `eboot.bin`, so a dump needs the build made from it. The launcher looks for `bbgame*` next to itself
+  (and in folders added on the Games tab) and matches the SHA-256 of the dump's `eboot.bin` with the one the build recorded: the file
+  `<exe>.eboot.sha256` that the CMake build writes next to `bbgame`, a line `bbgame.exe=<sha256>` in a `games.ini` in that folder, or the output of
+  `bbgame --eboot-hash`. Without a match it says so and shows the build steps above.
+- Settings are written per game to `bbconfig.ini` (`KEY=VALUE` with the variable names of the runtime options below, `#` comments) in
+  `profiles\<game>\` and handed to `bbgame` via `BB_CONFIG`. `bbgame` itself reads `bbconfig.ini` next to its executable, else
+  `%APPDATA%\BloodbornePC\bbconfig.ini` (Linux: `$XDG_CONFIG_HOME/BloodbornePC`); real environment variables always win. `BB_FULLSCREEN=1` starts fullscreen.
+- The launcher's own state is `launcher.ini` in `%APPDATA%\BloodbornePC` (Linux: `$XDG_CONFIG_HOME/BloodbornePC`); installs go to
+  `games\<TITLE_ID>-<version>\` there. Command line: `--dry-run [--game <id>]` prints command, environment and `bbconfig.ini` without starting,
+  `--validate <dump> [--manifest <file>]` checks a dump, `--run <seconds>` starts the game without a window of its own, waits and stops it, `--config-dir <dir>` and
+  `--builds <dir>` use other folders, `--shot <png> [--tab games|settings|cheats] [--size WxH]` renders a frame.
+- `python tools/package.py --build <build dir> --game <path\to\bbgame.exe>` assembles `dist/BloodbornePC` (launcher, `bbinstall`, builds, manifests,
+  README, LICENSE; never game data). On Linux the launcher needs the SDL3 build dependencies (X11/Wayland headers) to open a window.
+
 ## Tools
 
 ```
@@ -124,4 +149,4 @@ bbdiff <eboot.bin> [inputs]   # local only: cmake -DBB_EBOOT=<eboot.bin>; compar
 ```
 
 License: GPL-3.0-or-later. `src/gpu/fsr1_spv.inc` contains shaders translated from AMD FidelityFX FSR 1 (MIT, notice in the file),
-generated with `tools/gen_fsr1_spv.py`.
+generated with `tools/gen_fsr1_spv.py`. The launcher uses Dear ImGui (MIT, © Omar Cornut) and SDL3 (zlib), both fetched at configure time.
