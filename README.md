@@ -87,8 +87,9 @@ libraries and unit tests. It does not build the game (`bbgame`), which needs you
   `BB_PRESENT_QUEUE=0` disables it. `BB_WINDOW=3840x2160`, F11 = fullscreen, `BB_SAVE_DIR=<folder>` (saves), `BB_STUB_IMPORTS=1`
   (missing imports as stubs).
 - Cheats: `BB_CHEATS=god,nohit,stamina` (comma list): `god` refills HP every frame, `nohit` takes no damage, stagger or fall death, `stamina` uses no
-  stamina. Applies to the EU 1.00 build only: the player's memory layout is checked at run time, and on any other build the game logs
-  `cheats: <name> unavailable on this build` and writes nothing.
+  stamina. Proven on the EU 1.00 build only: the player's memory layout is checked at run time (on an unknown layout the game logs
+  `cheats: <name> unavailable on this build` and writes nothing); the 1.09 layout is accepted by that check, but the offsets the cheats
+  write to have not been verified there.
 - Upscaling: if the window is larger than the game image (1920×1080), the presenter upscales with AMD FSR 1 (EASU + RCAS);
   `BB_UPSCALE=linear` = bilinear, `BB_FSR_SHARP=<stops>` (0 = sharpest, default 0.2). `BB_SHOT_OUT=1`: screenshots (`BB_SHOT_AT`) show the
   presented image at window size instead of the game image. Diagnostics for internal scaling: `BB_SCALE_LOG=<s>` logs one frame from
@@ -120,7 +121,7 @@ libraries and unit tests. It does not build the game (`bbgame`), which needs you
 `bblauncher` (built by default, SDL3 + Dear ImGui; mouse, keyboard and gamepad: D-pad/stick, A = select, B = back, L1/R1 = tabs) is the
 front end for the game: **Games** (add a dump folder and optionally the DLC folder: validated with the same checks as `bbinstall`, then installed or used in
 place), **Settings** (frame rate, window mode and size, internal resolution, upscaler, sharpness, interpolation, save folder, missing imports)
-and **Cheats** (`god`, `nohit`, `stamina`; they only work on builds whose memory layout is known, currently EU 1.00). **Play** starts the matching `bbgame`
+and **Cheats** (`god`, `nohit`, `stamina`; proven on EU 1.00 only, see the runtime options below). **Play** starts the matching `bbgame`
 and keeps its output in `game.log`; on a failed run the last lines are shown.
 
 - `bbgame` is recompiled from one specific `eboot.bin`, so a dump needs the build made from it. The launcher looks for `bbgame*` next to itself
