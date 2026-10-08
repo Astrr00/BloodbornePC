@@ -218,8 +218,8 @@ if(BB_EBOOT)
     # VulkanMemoryAllocator (MIT), header-only; private to bbgpu so bbgame's compile flags stay untouched.
     FetchContent_Declare(vma GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git GIT_TAG v3.3.0 GIT_SHALLOW TRUE SOURCE_SUBDIR no_cmake)  # header-only: no add_subdirectory
     FetchContent_MakeAvailable(vma)
-    add_library(bbgpu STATIC src/gpu/present.cpp src/gpu/vk_context.cpp src/gpu/backend.cpp src/gpu/pad.cpp src/gpu/nav.cpp src/gpu/audio_out.cpp src/gpu/write_watch.cpp)
-    option(BB_DEV_TOOLS "Dev cheats for testing in src/gpu/nav.cpp (BB_DEV_GODMODE, BB_DEV_NOHIT, BB_DEV_TELEPORT, live 'tp'); never in a release" OFF)
+    add_library(bbgpu STATIC src/gpu/present.cpp src/gpu/vk_context.cpp src/gpu/backend.cpp src/gpu/pad.cpp src/gpu/nav.cpp src/gpu/cheats.cpp src/gpu/audio_out.cpp src/gpu/write_watch.cpp)
+    option(BB_DEV_TOOLS "Scripted-play dev tools in src/gpu/nav.cpp (telemetry, navigation, BB_DEV_GODMODE, BB_DEV_NOHIT, BB_DEV_TELEPORT, live 'tp'/'hwwatch'); never in a release" OFF)
     set_source_files_properties(src/gpu/nav.cpp PROPERTIES COMPILE_DEFINITIONS BB_DEV_TOOLS=$<BOOL:${BB_DEV_TOOLS}>)
     target_include_directories(bbgpu PRIVATE ${vma_SOURCE_DIR}/include)
     target_include_directories(bbgpu PUBLIC src)

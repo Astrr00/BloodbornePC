@@ -7,6 +7,7 @@
 // the walk as a goto route (loops cut, simplified).
 #include "gpu/gpu_hooks.h"
 #include "gpu/pad.h"
+#include "gpu/cheats.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -27,42 +28,24 @@
 #include <string>
 #include <vector>
 
+#if BB_DEV_TOOLS  // the whole file: telemetry, navigation, tp, hwwatch, dev cheat switches (stubs at the end for release builds)
+
 namespace bb::gpu {
 namespace {
 
 const char* env(const char* k) { const char* v = std::getenv(k); return v && *v ? v : nullptr; }
-#if BB_DEV_TOOLS  // dev cheats for testing (CMake BB_DEV_TOOLS): BB_DEV_GODMODE=1 keeps HP at max, BB_DEV_NOHIT=1 makes the player
-                  // unhittable and undying, BB_DEV_TELEPORT=x,y,z once after a load
-const bool g_god = env("BB_DEV_GODMODE") && env("BB_DEV_GODMODE")[0] == '1';
-const bool g_nohit = env("BB_DEV_NOHIT") && env("BB_DEV_NOHIT")[0] == '1';
+// dev tools for testing (CMake BB_DEV_TOOLS): BB_DEV_GODMODE=1 / BB_DEV_NOHIT=1 switch on the BB_CHEATS god / nohit (cheats.cpp),
+// BB_DEV_TELEPORT=x,y,z once after a load
+bool dev_cheat(const char* k, uint32_t bit) {
+    const char* v = env(k);
+    if (!v || v[0] != '1') return false;
+    cheats_enable(bit);
+    return true;
+}
+const bool g_god = dev_cheat("BB_DEV_GODMODE", kCheatGod);
+const bool g_nohit = dev_cheat("BB_DEV_NOHIT", kCheatNoHit);
 const char* const g_tp_once = env("BB_DEV_TELEPORT");
-#else
-constexpr bool g_god = false, g_nohit = false;
-constexpr const char* g_tp_once = nullptr;
-#endif
 const bool g_on = env("BB_TELEMETRY") || env("BB_PAD_LIVE") || env("BB_ROUTE") || env("BB_ROUTE_REC") || g_god || g_nohit || g_tp_once;
-
-bool peek(uint64_t a, void* out, size_t n) {  // guest read that tolerates unmapped addresses (host address = guest address)
-    if (a < 0x10000) return false;
-#ifdef _WIN32
-    SIZE_T got = 0;
-    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(a), out, n, &got) && got == n;
-#else
-    std::memcpy(out, reinterpret_cast<const void*>(a), n);
-    return true;
-#endif
-}
-#if BB_DEV_TOOLS
-bool poke(uint64_t a, const void* in, size_t n) {
-#ifdef _WIN32
-    SIZE_T put = 0;
-    return WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(a), in, n, &put) && put == n;
-#else
-    std::memcpy(reinterpret_cast<void*>(a), in, n);
-    return true;
-#endif
-}
-#endif
 
 struct V3 { float x = 0, y = 0, z = 0; };
 float dist(const V3& a, const V3& b) { return std::hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
@@ -96,30 +79,21 @@ bool cam_pos(V3& c, V3& fwd, V3& right) {
     return true;
 }
 
-// The player (EU eboot; found by memory scan + write tests): X = [[0x593e848] (vtable 0x57301f0)
-// + 0x60] = the player character (vtable 0x578f310; re-created on respawn). Position: [[[X+0x20]+0x1a0]+0xf8] = its physics proxy
-// (vtable 0x57a7940): rotation 3x4 at +0x40, position float3 at +0x70 (feet; writing it teleports, the game copies it into every
-// other position). HP: an object with vtable 0x5735810 and owner X at +8, inside or shortly after X (seen at X+0xdc0, +0x1080,
-// +0x2a800): int32 HP at +0xf8, max HP +0xfc (the game's source: the HUD and other copies follow writes); uint16 debug flags at
-// +0x200 (4 NoDead, 8 NoDamage, 0x10 NoHit; the hit, damage and death code tests them next to the global GameData.AllNoDead/
-// AllNoDamage/AllNoHit bytes at 0x593e860..62). The vtable checks reject another eboot / a half-built world.
-uint64_t ld64(uint64_t a) { uint64_t v = 0; return peek(a, &v, 8) ? v : 0; }
-uint64_t player_chr() {
-    const uint64_t m = ld64(0x593e848), x = ld64(m) == 0x57301f0 ? ld64(m + 0x60) : 0;
-    return x && ld64(x) == 0x578f310 ? x : 0;
-}
+// The player: X = player_chr() (cheats.cpp) = the player character (re-created on respawn). Position: [[[X+0x20]+0x1a0]+0xf8] = its
+// physics proxy (vtable 0x57a7940): rotation 3x4 at +0x40, position float3 at +0x70 (feet; writing it teleports, the game copies it
+// into every other position).
 // Three pointer paths from X reach the proxy; one alone failed for a whole run once (no position until 226 s), so take the value
 // two of them agree on, else the first valid one. All three break now and then after a load (seen after lamp warps into the
 // Hunter's Dream: [X+0x20]+0x1a0, [X+0x58]+0x558, [X+0x2c0]+0x110 then hold other data, i.e. those objects differ per load), and
 // no proxy is reachable from X within 3 levels then. Fallback: nav_flip scans the heap for proxies (scan_proxy) and keeps the one in
 // front of the camera for this X.
-constexpr uint64_t kProxyVt = 0x57a7940;
+bool is_proxy_vt(uint64_t v) { return v == 0x57a7940 || v == 0x57a7960; }  // EU 1.00 / EU 1.09
 struct Path { uint32_t o[3]; };
 const Path g_paths[3] = {{{0x20, 0x1a0, 0xf8}}, {{0x58, 0x558, 0x770}}, {{0x2c0, 0x110, 0x38}}};
 uint64_t g_fb_x = 0, g_fb_proxy = 0;  // scan_proxy's proxy, valid while X is g_fb_x
 uint64_t follow(uint64_t x, const Path& p) {
     const uint64_t v = ld64(ld64(ld64(x + p.o[0]) + p.o[1]) + p.o[2]);
-    return v && ld64(v) == kProxyVt ? v : 0;
+    return v && is_proxy_vt(ld64(v)) ? v : 0;
 }
 uint64_t player_proxy() {
     static const bool no_paths = env("BB_NAV_NOPATHS");  // test the fallback: ignore the three paths
@@ -129,10 +103,10 @@ uint64_t player_proxy() {
     if (a && (a == b || a == c)) return a;
     if (b && b == c) return b;
     if (a || b || c) return a ? a : b ? b : c;
-    return g_fb_x == x && ld64(g_fb_proxy) == kProxyVt ? g_fb_proxy : 0;
+    return g_fb_x == x && is_proxy_vt(ld64(g_fb_proxy)) ? g_fb_proxy : 0;
 }
 std::string lookup_state() {  // where the player lookup breaks: every pointer of every path
-    const uint64_t m = ld64(0x593e848), x = ld64(m + 0x60);
+    const uint64_t m = player_mgr(), x = ld64(m + 0x60);
     std::string s;
     char b[128];
     std::snprintf(b, sizeof b, "m=%llx vt=%llx x=%llx vt=%llx", (unsigned long long)m, (unsigned long long)ld64(m), (unsigned long long)x,
@@ -163,7 +137,7 @@ uint64_t scan_proxy(const V3& cam, const V3& fwd) {
             if (!peek(c, buf, n)) continue;
             for (size_t i = 0; i < n / 8; ++i) {
                 float f[3];
-                if (buf[i] != kProxyVt || !peek(c + i * 8 + 0x70, f, 12)) continue;
+                if (!is_proxy_vt(buf[i]) || !peek(c + i * 8 + 0x70, f, 12)) continue;
                 const V3 q{f[0], f[1], f[2]}, v{q.x - cam.x, q.y - cam.y, q.z - cam.z};
                 const float d = dist(q, cam), along = v.x * fwd.x + v.y * fwd.y + v.z * fwd.z;
                 const float off = std::sqrt(std::max(0.f, d * d - along * along));
@@ -185,30 +159,11 @@ bool player_pos(V3& p) {
     p = {f[0], f[1], f[2]};
     return true;
 }
-uint64_t hp_block() {
-    static uint64_t cached = 0, scanned = 0;  // the block found, the X last searched in vain
-    static int retry = 0;
-    const uint64_t x = player_chr();
-    if (!x) return 0;
-    if (cached && ld64(cached) == 0x5735810 && ld64(cached + 8) == x) return cached;
-    cached = 0;
-    if (scanned == x && ++retry < 60) return 0;  // in vain for this X: look again every 60 calls (~2 s), the block may come later
-    scanned = x, retry = 0;
-    static uint64_t buf[0x2000];  // 64 KB chunks over [X, X + 1 MB)
-    for (uint64_t a = x; a < x + (1u << 20) && !cached; a += sizeof buf)
-        if (peek(a, buf, sizeof buf))
-            for (size_t i = 0; i + 1 < std::size(buf); ++i)
-                if (buf[i] == 0x5735810 && buf[i + 1] == x) { cached = a + i * 8; break; }
-    if (cached) scanned = 0;
-    return cached;
-}
-#if BB_DEV_TOOLS
 bool teleport(float x, float y, float z) {
     const uint64_t proxy = player_proxy();
     const float v[3] = {x, y, z};
     return proxy && poke(proxy + 0x70, v, 12);
 }
-#endif
 
 FILE* g_tel = nullptr;
 void ev(double t, int id, const char* what, const std::string& cmd) {
@@ -303,9 +258,7 @@ int parse(const std::string& line, Cmd& c) {
     else if (w == "wait") { c.k = K::Wait; if (!(in >> c.x)) return 0; }
     else if (w == "failfast") { c.k = K::FailFast; if (!(in >> c.x)) return 0; }
     else if (w == "press") { c.k = K::Press; if (!(in >> w) || !(c.btn = button(w))) return 0; }
-#if BB_DEV_TOOLS
     else if (w == "tp") { c.k = K::Tp; if (!(in >> c.x >> c.y >> c.z)) return 0; }
-#endif
     else return -1;
     return 1;
 }
@@ -484,7 +437,7 @@ bool nav_command(const char* line) {
         g_q.clear(), g_active = false;
         return true;
     }
-#if BB_DEV_TOOLS  // hwwatch <hex addr>... (up to 4): arm the 8-byte hardware write watchpoints (crash.cpp; BB_HWWATCH_ALL=1 prints every write with the guest call chain)
+    // hwwatch <hex addr>... (up to 4): arm the 8-byte hardware write watchpoints (crash.cpp; BB_HWWATCH_ALL=1 prints every write with the guest call chain)
     if (!std::strncmp(line, "hwwatch ", 8)) {
         uint64_t a[4];
         int n = 0;
@@ -497,7 +450,6 @@ bool nav_command(const char* line) {
         if (n && hooks().hw_watch) hooks().hw_watch(a, n);
         return true;
     }
-#endif
     Cmd c;
     const int ok = parse(line, c);
     if (ok > 0) push(c);
@@ -583,7 +535,6 @@ void nav_flip(double now) {
     const uint64_t hb = pos ? hp_block() : 0;
     int32_t hp[2] = {};
     const bool hp_ok = hb && peek(hb + 0xf8, hp, 8);
-#if BB_DEV_TOOLS
     static int settled = 0;  // BB_DEV_TELEPORT: once the player has existed for 2 s
     if (g_tp_once && settled >= 0 && (pos && cam ? ++settled : (settled = 0)) > 60) {
         float t[3] = {};
@@ -591,9 +542,6 @@ void nav_flip(double now) {
         std::fprintf(stderr, "nav: dev teleport to %g,%g,%g: %s\n", t[0], t[1], t[2], teleport(t[0], t[1], t[2]) ? "ok" : "failed");
         settled = -1;
     }
-    if (g_god && hp_ok && hp[0] > 0 && hp[0] < hp[1]) poke(hb + 0xf8, &hp[1], 4);  // ponytail: per flip; one hit above max HP still kills
-    if (uint16_t fl = 0; g_nohit && hb && peek(hb + 0x200, &fl, 2) && (fl & 0x1c) != 0x1c) fl |= 0x1c, poke(hb + 0x200, &fl, 2);  // NoDead|NoDamage|NoHit
-#endif
     if (world) record(p);
     if (!g_tel || now - tel_t < 0.25) return;
     tel_t = now;
@@ -603,6 +551,9 @@ void nav_flip(double now) {
                      std::asin(std::clamp(f.y, -1.f, 1.f)) * 57.29578f);
     if (pos) std::fprintf(g_tel, " pos=%.2f,%.2f,%.2f", p.x, p.y, p.z);
     if (hp_ok) std::fprintf(g_tel, " hp=%d/%d", hp[0], hp[1]);
+    if (uint16_t fl = 0; hb && peek(hb + 0x200, &fl, 2)) std::fprintf(g_tel, " fl=%x", fl);
+    if (int32_t st = 0; hb && peek(hb + 0x134, &st, 4)) std::fprintf(g_tel, " stam=%d", st);  // EU 1.00: int32 stamina in the HP block
+    if (cheats_god_fixes()) std::fprintf(g_tel, " godfix=%u", cheats_god_fixes());
     if (g_active) std::fprintf(g_tel, " cmd=%d stk=%.2f%s", g_cur.id, double(g_stk), g_sprint ? " sprint" : "");
     std::fputc('\n', g_tel);
     std::fflush(g_tel);
@@ -634,7 +585,7 @@ void nav_apply(PadSnapshot& s, double now) {
             else if (now - g_t0 > 300) finish(now, "fail timeout");
             break;
         case K::Tp: {  // teleport once the player stands still (a write while airborne / landing does not stick), then check for 1.5 s
-#if BB_DEV_TOOLS           // the player stays there: a wall / fence pushes back, the void lets fall (no way back: the write fails mid-air)
+            // the player stays there: a wall / fence pushes back, the void lets fall (no way back: the write fails mid-air)
             char b[64];
             if (!pos) { if (now - g_t0 > 5) finish(now, "fail no-player"); break; }
             if (g_phase == 0) {
@@ -655,7 +606,6 @@ void nav_apply(PadSnapshot& s, double now) {
                 std::snprintf(b, sizeof b, "fail moved=%.1f dy=%.1f", double(moved), double(dy));
                 finish(now, b);
             } else finish(now, "done");
-#endif
             break;
         }
         case K::Face: {  // turn the camera (right stick) toward x z
@@ -692,3 +642,12 @@ void nav_apply(PadSnapshot& s, double now) {
 }
 
 }  // namespace bb::gpu
+#else  // release build: the scripted-play tools (telemetry, navigation, tp, hwwatch) are compiled out
+namespace bb::gpu {
+bool nav_camera_wanted() { return false; }
+void nav_note_camera(const uint32_t*) {}
+void nav_flip(double) {}
+bool nav_command(const char*) { return false; }
+void nav_apply(PadSnapshot&, double) {}
+}  // namespace bb::gpu
+#endif

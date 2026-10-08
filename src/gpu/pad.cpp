@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gpu/pad.h"
+#include "gpu/cheats.h"
 
 #include <SDL3/SDL.h>
 
@@ -129,7 +130,7 @@ int g_script_axes[4] = {-1, -1, -1, -1};  // held script values (pad_snapshot on
 uint32_t g_script_held = 0;                // buttons held by "name+" (pad_snapshot only)
 std::atomic<double> g_script_now{0};       // the script clock at the last poll
 double pad_script_clock() { return g_script_now; }
-void pad_note_flip() { ++g_flips; nav_flip(g_script_now); }
+void pad_note_flip() { ++g_flips; cheats_flip(); nav_flip(g_script_now); }
 void parse_script(std::string s, double base, std::vector<ScriptedPress>& out) {
     static const struct { const char* n; uint32_t b; } names[] = {{"up", kUp}, {"down", kDown}, {"left", kLeft}, {"right", kRight}, {"cross", kCross}, {"circle", kCircle},
                                                                   {"square", kSquare}, {"triangle", kTriangle}, {"l1", kL1}, {"r1", kR1}, {"l2", kL2}, {"r2", kR2},
