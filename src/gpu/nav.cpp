@@ -35,7 +35,7 @@ namespace {
 
 const char* env(const char* k) { const char* v = std::getenv(k); return v && *v ? v : nullptr; }
 // dev tools for testing (CMake BB_DEV_TOOLS): BB_DEV_GODMODE=1 / BB_DEV_NOHIT=1 switch on the BB_CHEATS god / nohit (cheats.cpp),
-// BB_DEV_TELEPORT=x,y,z once after a load
+// BB_DEV_ONESHOT=1 clamps every enemy's HP to 1 (oneshot_flip), BB_DEV_TELEPORT=x,y,z once after a load
 bool dev_cheat(const char* k, uint32_t bit) {
     const char* v = env(k);
     if (!v || v[0] != '1') return false;
@@ -45,7 +45,8 @@ bool dev_cheat(const char* k, uint32_t bit) {
 const bool g_god = dev_cheat("BB_DEV_GODMODE", kCheatGod);
 const bool g_nohit = dev_cheat("BB_DEV_NOHIT", kCheatNoHit);
 const char* const g_tp_once = env("BB_DEV_TELEPORT");
-const bool g_on = env("BB_TELEMETRY") || env("BB_PAD_LIVE") || env("BB_ROUTE") || env("BB_ROUTE_REC") || g_god || g_nohit || g_tp_once;
+const bool g_oneshot = [] { const char* v = env("BB_DEV_ONESHOT"); return v && v[0] == '1'; }();
+const bool g_on = env("BB_TELEMETRY") || env("BB_PAD_LIVE") || env("BB_ROUTE") || env("BB_ROUTE_REC") || g_god || g_nohit || g_oneshot || g_tp_once;
 
 struct V3 { float x = 0, y = 0, z = 0; };
 float dist(const V3& a, const V3& b) { return std::hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
@@ -149,6 +150,64 @@ uint64_t scan_proxy(const V3& cam, const V3& fwd) {
     (void)cam, (void)fwd;
 #endif
     return best;
+}
+// BB_DEV_ONESHOT=1: every enemy HP block (vtable 0x5735810, owner != the player, plausible HP) is clamped to 1 HP, so any hit kills.
+// A heap scan finds the blocks (stalls this thread ~1-2 s, every 20 s: new enemies); every 30 flips the known ones are clamped again.
+// ponytail: EU 1.00 offsets only (HP +0xf8, max +0xfc); an enemy spawned between two scans keeps its HP for up to 20 s.
+void oneshot_flip(double now) {
+    constexpr uint64_t kHpVt = 0x5735810, kPlayerVt = 0x578f310;  // as in cheats.cpp
+    struct Blk { uint64_t a, owner; bool one = false; };  // one: clamped to 1 HP by us
+    static std::vector<Blk> blocks;
+    static uint64_t flips = 0;
+    static double scan_t = -1e9, log_t = 0;
+    static unsigned clamped = 0, killed = 0;
+    if (++flips % 30) return;
+    const uint64_t x = player_chr();
+    if (!x) return;
+    const auto enemy = [&](uint64_t a, uint64_t owner, int32_t hp[2]) {  // still a live enemy block of this owner
+        const uint64_t ovt = ld64(owner);
+        return ld64(a) == kHpVt && ld64(a + 8) == owner && owner != x && ovt >= 0x400000 && ovt < 0x10000000 && ovt != kPlayerVt && peek(a + 0xf8, hp, 8) &&
+               hp[1] > 0 && hp[1] <= 100000 && hp[0] <= hp[1];
+    };
+#ifdef _WIN32
+    if (now - scan_t >= 20) {
+        scan_t = now;
+        std::vector<uint64_t> cand;
+        static uint64_t buf[1 << 17];
+        MEMORY_BASIC_INFORMATION mi;
+        for (uint64_t a = 0x1000000000; a < 0x2000000000 && VirtualQuery(reinterpret_cast<void*>(a), &mi, sizeof mi); a = uint64_t(mi.BaseAddress) + mi.RegionSize) {
+            if (mi.State != MEM_COMMIT || (mi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(mi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+                continue;
+            const uint64_t end = uint64_t(mi.BaseAddress) + mi.RegionSize;
+            for (uint64_t c = uint64_t(mi.BaseAddress); c < end; c += sizeof buf) {
+                const size_t n = size_t(std::min<uint64_t>(sizeof buf, end - c));
+                if (!peek(c, buf, n)) continue;
+                for (size_t i = 0; i < n / 8; ++i) if (buf[i] == kHpVt && cand.size() < 4096) cand.push_back(c + i * 8);
+            }
+        }
+        std::vector<Blk> old;
+        old.swap(blocks);
+        for (const uint64_t a : cand)
+            if (int32_t hp[2]; enemy(a, ld64(a + 8), hp)) {
+                const uint64_t o = ld64(a + 8);
+                const auto it = std::find_if(old.begin(), old.end(), [&](const Blk& k) { return k.a == a && k.owner == o; });
+                blocks.push_back({a, o, it != old.end() && it->one});
+            }
+    }
+#endif
+    for (Blk& b : blocks)
+        if (int32_t hp[2]; enemy(b.a, b.owner, hp)) {
+            if (hp[0] > 1) {
+                const int32_t one = 1;
+                if (poke(b.a + 0xf8, &one, 4)) ++clamped, b.one = true;
+            } else if (hp[0] <= 0 && b.one) {
+                b.one = false, ++killed;
+                std::fprintf(stderr, "nav @%.2f: oneshot: enemy block %llx (owner %llx, max HP %d) died after the clamp, HP now %d\n", now, (unsigned long long)b.a,
+                             (unsigned long long)b.owner, hp[1], hp[0]);
+            }
+        }
+    if (now - log_t >= 10)
+        log_t = now, std::fprintf(stderr, "nav @%.2f: oneshot: %zu enemy HP blocks, %u clamped so far, %u died\n", now, blocks.size(), clamped, killed);
 }
 // the main camera follows the player (3-5 m); the title screen has a camera 18 m away while the player already exists
 bool in_world(const V3& cam, const V3& p) { return dist(cam, p) < 8.f; }
@@ -501,13 +560,14 @@ void record(const V3& p) {
 
 void nav_flip(double now) {
     if (!g_on) return;
+    if (g_oneshot) oneshot_flip(now);
     static double tel_t = -1, lost_t = -1, lost_log = -100, scan_t = 0;
     static uint64_t scanned = 0, seen_ok = 0;  // the X last scanned for; the X whose lookup was logged as working
     std::lock_guard lk(g_m);
     if (!g_tel && env("BB_TELEMETRY")) g_tel = std::fopen(env("BB_TELEMETRY"), "w");
-    if (g_flip++ == 0 && (g_god || g_nohit || g_tp_once))
-        std::fprintf(stderr, "nav: DEV CHEAT ACTIVE:%s%s%s%s\n", g_god ? " godmode" : "", g_nohit ? " nohit" : "", g_tp_once ? " teleport " : "",
-                     g_tp_once ? g_tp_once : "");
+    if (g_flip++ == 0 && (g_god || g_nohit || g_oneshot || g_tp_once))
+        std::fprintf(stderr, "nav: DEV CHEAT ACTIVE:%s%s%s%s%s\n", g_god ? " godmode" : "", g_nohit ? " nohit" : "", g_oneshot ? " oneshot" : "",
+                     g_tp_once ? " teleport " : "", g_tp_once ? g_tp_once : "");
     if (g_nvotes) {
         int best = 0;
         for (int i = 1; i < g_nvotes; ++i) if (g_votes[i].n > g_votes[best].n) best = i;
