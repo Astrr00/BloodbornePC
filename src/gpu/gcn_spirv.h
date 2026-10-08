@@ -99,6 +99,7 @@ struct Translation {
     ScalarVal fetch_lo, fetch_hi;            // its address as user data (a draw's own fetch shader: fetch_address)
     std::vector<uint32_t> fetch_code;        // its code: part of the cache key (compared at the draw's fetch_address)
     std::string error;                       // non-empty: translation failed
+    bool read_failed = false;                // error: a guest read failed; it is the last of `loads` (retry once eval_resources reads it)
     uint32_t tess_ls = 0;                    // copy of GcnEnv::tess_ls (part of the shader identity)
     uint32_t tess_ds_level = 0;              // copy of GcnEnv::tess_ds_level (0 = not a domain shader)
 };

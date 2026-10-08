@@ -2051,18 +2051,19 @@ void Backend::get_shader(ShStage st, const RegView& r, BoundShader& out) {
 
     auto& list = shaders[key];
     for (auto& e : list) {
-        if (!e->tr.error.empty()) {  // failed translations are sticky per key (descriptor shape retries cost too much) ...
-            // ... except failures that depend on descriptor contents (an image slot still empty on first use, a buffer format not yet set up): retry every 128th use
+        if (!e->tr.error.empty()) {  // failed translations are sticky per key (descriptor shape retries cost too much), except:
+            // a failed guest read (tr.read_failed; it is the last of tr.loads) retranslates on the first draw that reads it; an image slot
+            // still empty on first use or a buffer format not yet set up retries every 128th use
             const std::string& er = e->tr.error;
-            if (!e->kind && (er.rfind("image type", 0) == 0 || er.rfind("buffer format", 0) == 0 || er.find("unreadable") != std::string::npos) && ++e->fail_uses % 128 == 0) {
-                std::unique_ptr<ShaderEntry> n(translate_new(st, r, addr));
-                if (n && n->tr.error.empty()) {
-                    log_once(n->log_name + "retry", std::string("shader ") + n->log_name + " now translates (it failed earlier: " + er + ")");
-                    list.erase(list.begin() + (&e - list.data()));  // the failed entry owns no GPU objects
-                    list.emplace_back(std::move(n));
-                    ShaderEntry* ne = list.back().get();
-                    if (eval_resources(ne->tr, user, rd_guest, out.words)) out.e = ne;
-                    return;
+            if (!e->kind && (e->tr.read_failed ? eval_resources(e->tr, user, rd_guest, out.words)
+                                               : (er.rfind("image type", 0) == 0 || er.rfind("buffer format", 0) == 0) && ++e->fail_uses % 128 == 0)) {
+                if (std::unique_ptr<ShaderEntry> n(translate_new(st, r, addr)); n) {
+                    if (n->tr.error.empty()) log_once(n->log_name + "retry", std::string("shader ") + n->log_name + " now translates (it failed earlier: " + er + ")");
+                    e = std::move(n);  // in place; the failed entry owns no GPU objects. Still failing: the new error (e.g. a later read) decides
+                    if (e->tr.error.empty()) {
+                        if (eval_resources(e->tr, user, rd_guest, out.words)) out.e = e.get();
+                        return;
+                    }
                 }
             }
             out.e = e.get();

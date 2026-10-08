@@ -103,6 +103,19 @@ int main() {
         check("if/else scalar state", t);
         assert(t.loads.size() == 1 && t.resources.size() == 1 && t.resources[0].load_data);
     }
+    {  // an unreadable s_load table fails with read_failed and the failed read as the last load: the host retries once a draw reads it
+        static uint32_t data[4] = {1, 2, 3, 4};
+        const uint32_t c[] = {0xC0820300, 0x7E000204, 0xF8001C0F, 0x00000000, 0xBF810000};  // s_load_dwordx4 s[4:7], s[2:3], 0; v_mov_b32 v0, s4; exp mrt0
+        GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 4;
+        env.user[2] = uint32_t(uintptr_t(data)); env.user[3] = uint32_t(uint64_t(uintptr_t(data)) >> 32);
+        env.read_mem = [](uint64_t, uint32_t*, uint32_t) { return false; };
+        const Translation t = translate(c, 5, env);
+        assert(!t.error.empty() && t.read_failed && t.loads.size() == 1 && t.loads[0].dwords == 4);
+        std::vector<std::array<uint32_t, 8>> w;
+        assert(!eval_resources(t, env.user, env.read_mem, w));
+        const std::function<bool(uint64_t, uint32_t*, uint32_t)> ok = [](uint64_t a, uint32_t* d, uint32_t n) { std::memcpy(d, reinterpret_cast<const void*>(a), n * 4); return true; };
+        assert(eval_resources(t, env.user, ok, w));
+    }
     {  // scalar-branch shapes a structured selection cannot express are rejected with a reason, never translated into wrong/invalid SPIR-V
         GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
         auto fails = [&](const char* what, const uint32_t* c, size_t n, const char* reason) {

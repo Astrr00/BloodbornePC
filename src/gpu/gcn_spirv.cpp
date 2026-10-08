@@ -712,7 +712,12 @@ bool Xlat::smrd(const Insn& in, const std::string& m) {
         l.lo = lo.v; l.hi = hi.v; l.offset = off * 4; l.dwords = cnt;
         const uint64_t addr = (uint64_t(eval_sval(l.hi)) << 32 | eval_sval(l.lo)) + l.offset;
         std::vector<uint32_t> vals(cnt);
-        if (!env_.read_mem || !env_.read_mem(addr, vals.data(), cnt)) return fail("s_load: guest memory unreadable at translation time", &in);
+        if (!env_.read_mem || !env_.read_mem(addr, vals.data(), cnt)) {  // (the table this draw points at; a later draw may read it)
+            char why[96];
+            std::snprintf(why, sizeof why, "s_load: guest memory unreadable at translation time (0x%llx)", (unsigned long long)addr);
+            if (err_.empty()) T.loads.push_back(l), T.read_failed = true;
+            return fail(why, &in);
+        }
         load_vals_.push_back(vals);
         T.loads.push_back(l);
         for (unsigned k = 0; k < cnt; ++k) {
@@ -1989,7 +1994,10 @@ bool Xlat::step(const Insn& in) {
                 T.fetch_lo = sym_[src].v; T.fetch_hi = sym_[src + 1].v;
                 const uint64_t addr = (uint64_t(eval_sval(T.fetch_hi)) << 32) | eval_sval(T.fetch_lo);
                 fetch_.assign(512, 0);
-                if (!env_.read_mem || !env_.read_mem(addr, fetch_.data(), 512)) return fail("fetch shader unreadable", &in);
+                if (!env_.read_mem || !env_.read_mem(addr, fetch_.data(), 512)) {
+                    if (err_.empty()) T.loads.push_back({T.fetch_lo, T.fetch_hi, 0, 512}), T.read_failed = true;
+                    return fail("fetch shader unreadable", &in);
+                }
                 T.fetch_addr = addr;
                 ret_code_ = code_; ret_n_ = n_; ret_pc_ = pc_ + in.len;
                 code_ = fetch_.data(); n_ = fetch_.size(); pc_ = 0; jumped_ = true;
