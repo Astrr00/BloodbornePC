@@ -19,8 +19,8 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Detailed, dated evid
 | Installer (hash check, copy, error messages) | 85 % | works; a build in a fresh directory has not been run yet |
 | Windows 11 (Windows 10 untested) | 85 % | runs natively, saves, audio and movies work; a few rendering oddities and untranslated shaders remain |
 | Linux / Steam Deck | 10 % | libraries and tests build in CI; the game has not been run with a window on Linux |
-| Base game, playthrough | 75 % | 7 of 10 required bosses defeated in real combat, an 8th (One Reborn) only killed with a test aid that sets enemy HP to 1; the Lecture Building and the Nightmare of Mensis are entered (list below); the ending is untested |
-| The Old Hunters (DLC) | 10 % | the Hunter's Nightmare is entered by the in-game trigger (1.09 build), loads via Continue, three lamps work; the first boss (Ludwig) fights, kills the player normally and dies only with the test aid |
+| Base game, playthrough | 78 % | 7 of 10 required bosses defeated in real combat, an 8th (One Reborn) only killed with a test aid that sets enemy HP to 1; the Lecture Building and the Nightmare of Mensis (two lamps) are entered; the ending is untested |
+| The Old Hunters (DLC) | 25 % | the Hunter's Nightmare is entered by the in-game trigger (1.09 build) and loads via Continue; lamps, the Eye Pendant, the Surgery Altar lift and the Research Hall lamp work; Ludwig fights, kills the player normally and dies only with the test aid; no DLC boss defeated in real combat |
 | Frame rate (30 Hz simulation, up to 165 Hz output) | 85 % | interpolated output measured at 165 Hz; not every rate checked in every area |
 | Resolution up to 4K, post effects | 90 % | internal 4K and FSR 1 upscaling work |
 
