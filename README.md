@@ -11,15 +11,15 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Detailed, dated evid
 
 ## Progress
 
-**Overall: roughly 60 %. Not finished, not yet playable to the end.** Rough estimates by the maintainers (equal weight per row); the
-evidence behind every row is in [docs/ROADMAP.md](docs/ROADMAP.md).
+**Overall: roughly 60 % (estimate, equal weight per row). Not finished, not yet playable to the end.** The evidence behind every row is in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 | Area | Progress | Basis |
 |---|---|---|
 | Installer (hash check, copy, error messages) | 85 % | works; a build in a fresh directory has not been run yet |
-| Windows 10/11 | 85 % | runs natively, saves, audio and movies work; a few rendering oddities and untranslated shaders remain |
+| Windows 11 (Windows 10 untested) | 85 % | runs natively, saves, audio and movies work; a few rendering oddities and untranslated shaders remain |
 | Linux / Steam Deck | 10 % | libraries and tests build in CI; the game has not been run with a window on Linux |
-| Base game, playthrough | 60 % | 6 of 10 required bosses reached (Rom's arena, not Rom); the ending is untested |
+| Base game, playthrough | 60 % | 6 of 10 required bosses reached (list below), Rom's arena but not Rom; the ending is untested |
 | The Old Hunters (DLC) | 0 % | untested |
 | Frame rate (30 Hz simulation, up to 165 Hz output) | 85 % | interpolated output measured at 165 Hz; not every rate checked in every area |
 | Resolution up to 4K, post effects | 90 % | internal 4K and FSR 1 upscaling work |
@@ -27,6 +27,10 @@ evidence behind every row is in [docs/ROADMAP.md](docs/ROADMAP.md).
 Tested with the EU 1.00 `eboot.bin` on one machine (Windows 11, RTX 3070 Ti, 165 Hz monitor); the 1.09 build only reaches the clinic so far.
 Story progress was reached by scripted play with test aids that are not part of normal builds, and some stretches were bridged by
 teleporting, so "reached" means the game logic, loading, rendering and cutscenes worked there, not that a player can do it unaided.
+
+Required bosses counted (shortest route to an ending; optional bosses such as the Witch of Hemwick are not counted): reached – Scourge Beast,
+Cleric Beast, Father Gascoigne, Blood-starved Beast, Vicar Amelia, Shadows of Yharnam (counted because the way to Byrgenwerth leads through
+its arena); not reached – Rom, Mergo's Wet Nurse, Micolash, the final boss. The list is the maintainers' own count.
 
 ## Build
 
