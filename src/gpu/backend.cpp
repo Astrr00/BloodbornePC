@@ -2308,6 +2308,17 @@ Image* Backend::get_texture(const uint32_t* w, bool storage, uint32_t pad_axes) 
     }
     auto dsit = dss.find(base);  // a depth buffer sampled as a texture (shadow maps etc.)
     if (dsit != dss.end() && dsit->second->format != VK_FORMAT_S8_UINT && dsit->second->gw() >= width && dsit->second->gh() >= height) { ensure_init(dsit->second.get()); tex_memo_ok = true; return dsit->second.get(); }
+    // Tile indices 0..7 (Depth_2dThin_64..1K, Depth_1dThin, depth PRT) are depth-buffer layouts; their data lives in a depth buffer, which
+    // the lookup above did not find: a shadow map sampled before its first pass (the Nightmare's 4096x4096 D32F sun map, map loading, ~300
+    // lookups). The shader reads 0, as an empty image gave, without keeping a 64 MB R32F image for the session. ponytail: no guest-memory
+    // upload of depth tiling (nothing in the game's own memory uses it), add a depth micro-tile order if a CPU-filled depth texture shows up.
+    if (tile < 8) {
+        ++tex_unsup;
+        char b2[160];
+        std::snprintf(b2, sizeof b2, "depth-tiled texture (tile %u) base=0x%llx %ux%u dfmt=%u nfmt=%u sampled before its depth buffer exists; bound empty", tile, (unsigned long long)base, width, height, dfmt, nfmt);
+        log_once(b2, b2);
+        return nullptr;
+    }
 
     // Sampled and storage uses of the same memory must be one VkImage (a compute pass writes what a later pixel shader samples), whatever
     // number format each T# names: the blood maps of the characters are written through a UINT storage T# per mip level and sampled
