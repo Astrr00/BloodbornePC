@@ -75,11 +75,23 @@ libraries and unit tests. It does not build the game (`bbgame`), which needs you
   of 1920×1080, including post-processing and HUD; shadow maps, cube and small effect targets stay native. Needs 148 bytes of push
   constants (otherwise factor 1). Use with `BB_WINDOW=3840x2160` or fullscreen. On an RTX 3070 Ti this costs ≈ 28.5 ms GPU per frame
   (30 fps, no room for interpolated frames); 1080p internal with FSR to 4K output costs ≈ 0.45 ms.
-- Scripted play (testing): `BB_TELEMETRY=<file>` writes ~4 lines/s `T t= f= st=play|menu|load cam=x,y,z yaw= pitch= pos=x,y,z hp=cur/max`
-  (`pos` = player feet, world coordinates; `menu` = a camera but not near the player, e.g. the title) plus `E t= <id> start|done|stuck|fail ...` per command. Commands, as lines appended to the
-  `BB_PAD_LIVE` file or listed in a `BB_ROUTE=<file>` (run in order, `#` comments): `goto <x> <z> [tol] [sprint]` (closed-loop run
-  relative to the camera; < 0.3 m progress in 1 s = `stuck`: back off, side-step, retry; `fail stuck` after 6), `face <x> <z>`,
-  `wait_load`, `wait <s>`, `press <button>`. `BB_ROUTE_REC=<file>[,<metres>]` appends `goto x z` every 3 m walked (a reusable route).
+- Scripted play (testing): `BB_TELEMETRY=<file>` writes ~4 lines/s `T t= f= st=play|menu|load cam=x,y,z yaw= pitch= pos=x,y,z hp=cur/max
+  cmd=<id> stk=<0..1> [sprint]` (`pos` = player feet, world coordinates; `menu` = a camera but not near the player, e.g. the title; `stk` = stick
+  magnitude nav applies) plus `E t= <id> start|done|stuck|fail ...` per command. Commands, as lines appended to the `BB_PAD_LIVE` file or
+  listed in a `BB_ROUTE=<file>` (run in order, `#` comments; a failed command does not stop the queue by default; after `failfast 1` it
+  drops the rest, `E ... dropped N queued`; `failfast 0` switches back):
+  - `goto <x> <z> [tol] [t=<s>]` (a trailing `sprint` of older routes is ignored): closed-loop run relative to the camera. Consecutive
+    gotos form one route that is run through without stopping (look-ahead steering along the route, corners cut by ≤ ~1 m, `done d= pass`
+    per waypoint); sprint is automatic on straight stretches, not into sharp turns or the last 6 m. A goto with an explicit `tol` is an
+    exact stop (prompts), as is the last goto before another command; default tol 0.8 m. `t=` = time limit (`fail timeout`). < 0.3 m
+    progress in 1 s = `stuck`: side-step / back off and blend back into the route (the same side again while that gains > 1 m, else the
+    other); a pass-through waypoint within 3 m after two `stuck`s is skipped (`done ... skip`); `fail stuck` after 6 without gain.
+  - `ladder <x> <z> [<fx> <fz>] [down]`: exact goto to the ladder's foot (top for `down`), turn toward `fx fz`, cross, hold the stick up
+    (down) until the player stops moving along the ladder or steps off; `done dy=` / `fail no-ladder`.
+  - `face <x> <z>` (camera; presses R3 once if a lock-on blocks the turn, else `fail no-turn`), `wait_load`, `wait <s>`, `press <button>`.
+  - `abort` or `clear` (live): drops the running and queued commands and the pad script's pending presses and held buttons / stick values.
+  - `BB_ROUTE_REC=<file>[,<metres>]` records the walk as a reusable route: a point every 3 m, loops and backtracking (fights, searching)
+    cut, simplified; the file is rewritten after every point.
 
 ## Tools
 

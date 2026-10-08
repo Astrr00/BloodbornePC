@@ -176,7 +176,12 @@ void poll_live(double now) {  // BB_PAD_LIVE (pad_snapshot only)
         consumed += long(nl + 1);
         std::string line = rest.substr(0, nl);
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (nav_command(line.c_str())) continue;  // goto / face / ... (nav.cpp logs and reports it)
+        if (line == "abort" || line == "clear") {  // also drop scripted presses, held buttons and held stick values
+            for (auto& p : pad_script()) p.done = true;
+            std::fill(std::begin(g_script_axes), std::end(g_script_axes), -1);
+            g_script_held = 0;
+        }
+        if (nav_command(line.c_str())) continue;  // goto / face / abort / ... (nav.cpp logs and reports it)
         parse_script(line, now, pad_script());
         std::fprintf(stderr, "pad-live @%.2f: %s\n", now, line.c_str());
     }
