@@ -9,53 +9,24 @@ You need a decrypted folder dump of your own copy, made by yourself.
 Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Detailed, dated evidence for everything below: [docs/ROADMAP.md](docs/ROADMAP.md)
 (written in German; it lists what has been shown to work and what has not).
 
-## Status
+## Progress
 
-**Not finished.** The game starts, runs and can be played a long way on Windows, but it has not been played to the end, the DLC has not
-been tried, and Linux has not been tested with a window. Everything below was tested with the **EU 1.00** `eboot.bin` on one machine
-(Windows 11, RTX 3070 Ti, 165 Hz monitor); the 1.09 build has so far only been shown to reach the clinic.
+**Overall: roughly 60 %. Not finished, not yet playable to the end.** Rough estimates by the maintainers (equal weight per row); the
+evidence behind every row is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
-Most of the story progress was reached by **scripted play** (a pad script plus telemetry). Boss fights were run with test aids that are not
-part of normal builds, and a few stretches were bridged by teleporting instead of walking. So "reached" below means "the game logic, loading,
-rendering and cutscenes worked there", not "a player can do it without help".
+| Area | Progress | Basis |
+|---|---|---|
+| Installer (hash check, copy, error messages) | 85 % | works; a build in a fresh directory has not been run yet |
+| Windows 10/11 | 85 % | runs natively, saves, audio and movies work; a few rendering oddities and untranslated shaders remain |
+| Linux / Steam Deck | 10 % | libraries and tests build in CI; the game has not been run with a window on Linux |
+| Base game, playthrough | 60 % | 6 of 10 required bosses reached (Rom's arena, not Rom); the ending is untested |
+| The Old Hunters (DLC) | 0 % | untested |
+| Frame rate (30 Hz simulation, up to 165 Hz output) | 85 % | interpolated output measured at 165 Hz; not every rate checked in every area |
+| Resolution up to 4K, post effects | 90 % | internal 4K and FSR 1 upscaling work |
 
-### What has been shown to work (Windows)
-
-- **Install:** dump validation by hash manifest (EU 1.09 manifest included), free-space check, incomplete-install marker, verification of the
-  installed copy.
-- **Story progress reached:** Iosefka's Clinic and the first beast, Hunter's Dream, Central Yharnam (first lamp), Cleric Beast and the Great
-  Bridge, Father Gascoigne (with his intro cutscene) and the Tomb of Oedon lamp, Cathedral Ward, Old Yharnam and the Blood-starved Beast,
-  Church of the Good Chalice lamp, Vicar Amelia (with intro and the skull vision), Shadows of Yharnam, the Forbidden Woods and Byrgenwerth
-  lamps, and the Rom arena (Rom itself has not been defeated). Hemwick and everything after Rom (Nightmare, Mensis, the endings) is untested.
-- **Save / continue:** saving through the in-game menu and continuing works; a lamp is stored once the game has autosaved. Whether doors and
-  gates stay open across a reload has not been checked yet.
-- **Cutscenes:** real-time scenes (Gascoigne, the Oedon chapel, Amelia, the skull vision, the lake and Rom intros) play through without
-  hanging. Pre-rendered movies (title attract, the opening after "New Game") play through Windows Media Foundation, with video, audio and
-  the game's own audio-track choice; the staff roll is untested.
-- **Audio:** sound plays; in the Gascoigne scene speech was measured in the centre channel. Other cutscenes were only checked for music or
-  effects, not for speech.
-- **Frame rate:** the game simulation runs at 30 Hz. With `BB_FPS=refresh` the presenter shows interpolated images at the monitor rate;
-  at 165 Hz about 163.7 distinct images per second were measured (clinic scene). The median game frame rate was about 30 fps in the areas
-  above; a slowdown to 5–10 fps in the Forbidden Woods was traced to tessellation buffers in host memory and fixed. Dips during loading and
-  teleports are expected.
-- **Resolution:** internal rendering up to 4K (`BB_RES_SCALE`), FSR 1 upscaling, anisotropic filtering.
-- **Library coverage:** 587 of 681 imported library functions have a host implementation; the rest are listed in the ROADMAP.
-
-### Known problems and open questions
-
-- **Combat damage:** damage per hit was measured far below the expected value in the Rom arena; the cause is being investigated (it may be
-  the test setup, not the port), so combat balance is not yet confirmed.
-- **Rendering:** a few things look wrong or unverified against the original: the Moonside Lake fog is fully white with a nearly black
-  player silhouette, the Grand Cathedral curtains render pitch black (the lighting data for them reads zero; no reference from real
-  hardware), boss fog walls were not seen. The shaders `ps@105b20fa00` (image type 0) and some others are reported as not translated at
-  load time; the same load messages for texture tiling index 0 and unmapped texture memory appear in every run.
-- **World state:** some gates and levers did not react ("Open Gate" with no effect, one elevator lever without a prompt); whether this is
-  game behaviour or a port bug is open.
-- **Not tested:** the ending and staff roll, the DLC (The Old Hunters), Hemwick and later areas, a full new game from start to finish, the
-  1.09 build beyond the clinic.
-- **Linux / Steam Deck:** libraries, tools and unit tests build and pass in CI (Ubuntu, Clang); a compile of the HLE and GPU libraries with
-  g++ was checked. The game itself, a window and Vulkan on Linux have **not** been tested; pre-rendered movies are Windows-only for now
-  (on other platforms the game skips them).
+Tested with the EU 1.00 `eboot.bin` on one machine (Windows 11, RTX 3070 Ti, 165 Hz monitor); the 1.09 build only reaches the clinic so far.
+Story progress was reached by scripted play with test aids that are not part of normal builds, and some stretches were bridged by
+teleporting, so "reached" means the game logic, loading, rendering and cutscenes worked there, not that a player can do it unaided.
 
 ## Build
 
