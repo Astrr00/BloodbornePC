@@ -20,11 +20,11 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Detailed, dated evid
 | Windows 11 (Windows 10 untested) | 85 % | runs natively, saves, audio and movies work; a few rendering oddities and untranslated shaders remain |
 | Linux / Steam Deck | 10 % | libraries and tests build in CI; the game has not been run with a window on Linux |
 | Base game, playthrough | 70 % | 7 of 10 required bosses defeated (list below); the ending is untested |
-| The Old Hunters (DLC) | 0 % | untested |
+| The Old Hunters (DLC) | 5 % | the Hunter's Nightmare is entered by the in-game trigger (1.09 build) and loads via Continue; no lamp or boss reached yet |
 | Frame rate (30 Hz simulation, up to 165 Hz output) | 85 % | interpolated output measured at 165 Hz; not every rate checked in every area |
 | Resolution up to 4K, post effects | 90 % | internal 4K and FSR 1 upscaling work |
 
-Tested with the EU 1.00 `eboot.bin` on one machine (Windows 11, RTX 3070 Ti, 165 Hz monitor); the 1.09 build only reaches the clinic so far.
+Tested with the EU 1.00 `eboot.bin` on one machine (Windows 11, RTX 3070 Ti, 165 Hz monitor); the 1.09 build has run the clinic, the Dream, a walk through Central Yharnam and the entry into the Hunter's Nightmare.
 Story progress was reached by scripted play with test aids that are not part of normal builds, and some stretches were bridged by
 teleporting, so "reached" means the game logic, loading, rendering and cutscenes worked there, not that a player can do it unaided.
 
