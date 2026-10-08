@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "core/bbconfig.h"
 #include "core/orbis_elf.h"
 #include "core/util.h"
 #include "hle/hle.h"
@@ -28,8 +29,19 @@
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // The eboot this binary was recompiled from (hash recorded by CMake at configure time): the launcher matches dumps to builds with it.
+    if (argc == 2 && std::string(argv[1]) == "--eboot-hash") {
+#ifdef BB_BUILD_EBOOT_SHA256
+        std::puts(BB_BUILD_EBOOT_SHA256);
+        return 0;
+#else
+        return 1;
+#endif
+    }
+    // bbconfig.ini (launcher settings): fills BB_* variables that are not already set, before any option is read.
+    if (const std::string cfg = bb::load_config_into_env(bb::exe_dir()); !cfg.empty()) std::puts(cfg.c_str());
     if (argc < 2) {
-        std::fputs("usage: bbgame <eboot.bin> [--no-run]\n", stderr);
+        std::fputs("usage: bbgame <eboot.bin> [--no-run] | --eboot-hash\n", stderr);
         return 2;
     }
     const bool run = !(argc > 2 && std::string(argv[2]) == "--no-run");

@@ -51,7 +51,10 @@ endif()
 
 # Image parsing only (ELF/SELF, NIDs, hashes): shared by tools and the game runtime, no disassembler.
 add_library(bbimage STATIC
+    src/core/bbconfig.cpp
+    src/core/dump.cpp
     src/core/hash.cpp
+    src/core/install.cpp
     src/core/nid.cpp
     src/core/orbis_elf.cpp
     src/core/sfo.cpp)
@@ -60,7 +63,6 @@ target_include_directories(bbimage PUBLIC src)
 # Analysis + recompiler (tools only).
 add_library(bbcore STATIC
     src/core/functions.cpp
-    src/core/dump.cpp
     src/recomp/emitter.cpp)
 target_link_libraries(bbcore PUBLIC bbimage Zydis)
 
@@ -79,7 +81,7 @@ if(WIN32)
 endif()
 
 add_executable(bbinstall tools/bbinstall/main.cpp)
-target_link_libraries(bbinstall PRIVATE bbcore)
+target_link_libraries(bbinstall PRIVATE bbimage)
 
 add_executable(bbelf tools/bbelf/main.cpp)
 target_link_libraries(bbelf PRIVATE bbcore)
@@ -91,6 +93,46 @@ endif()
 
 add_executable(bbrecomp tools/bbrecomp/main.cpp)
 target_link_libraries(bbrecomp PRIVATE bbcore)
+
+# SDL3 (zlib): window + Vulkan for bbgame, window + SDL_Renderer for the launcher.
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+if(UNIX AND NOT APPLE AND NOT SDL_UNIX_CONSOLE_BUILD)
+    # Without X11/Wayland headers SDL refuses to configure; fall back to a windowless build (CI builds and tests, the launcher cannot open a window).
+    find_path(BB_X11_HEADER X11/Xlib.h)
+    find_path(BB_WAYLAND_HEADER wayland-client.h)
+    if(NOT BB_X11_HEADER AND NOT BB_WAYLAND_HEADER)
+        message(WARNING "No X11/Wayland headers found: SDL3 is built without window support (install libx11-dev / libwayland-dev for a usable launcher).")
+        set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+    endif()
+endif()
+FetchContent_Declare(sdl3 GIT_REPOSITORY https://github.com/libsdl-org/SDL.git GIT_TAG release-3.2.8 GIT_SHALLOW TRUE)
+# SDL sets its own warning level; our global /W4 would only produce D9025 "overriding" noise there.
+get_directory_property(BB_DIR_OPTIONS COMPILE_OPTIONS)
+set_directory_properties(PROPERTIES COMPILE_OPTIONS "")
+FetchContent_MakeAvailable(sdl3)
+set_directory_properties(PROPERTIES COMPILE_OPTIONS "${BB_DIR_OPTIONS}")
+
+# Launcher: Dear ImGui (MIT) on SDL_Renderer, sources only (imgui has no CMake project).
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.92.9 GIT_SHALLOW TRUE SOURCE_SUBDIR no_cmake)
+FetchContent_MakeAvailable(imgui)
+add_library(bbimgui STATIC ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
+target_include_directories(bbimgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(bbimgui PUBLIC SDL3::SDL3-static)
+if(MSVC)
+    set_property(TARGET bbimgui PROPERTY COMPILE_OPTIONS /W0 /utf-8)  # third-party: replaces the global /W4 (no D9025)
+else()
+    set_property(TARGET bbimgui PROPERTY COMPILE_OPTIONS -w)
+endif()
+
+add_library(bblaunchercore STATIC tools/launcher/core.cpp)
+target_include_directories(bblaunchercore PUBLIC tools/launcher)
+target_link_libraries(bblaunchercore PUBLIC bbimage)
+add_executable(bblauncher WIN32 tools/launcher/main.cpp)
+target_link_libraries(bblauncher PRIVATE bblaunchercore bbimgui)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -117,6 +159,10 @@ if(BUILD_TESTING)
         target_link_libraries(test_spirv PRIVATE bbgcn SPIRV-Tools)
         add_test(NAME spirv COMMAND test_spirv)
     endif()
+
+    add_executable(test_launcher tests/test_launcher.cpp)
+    target_link_libraries(test_launcher PRIVATE bblaunchercore)
+    add_test(NAME launcher COMMAND test_launcher)
 
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_FOUND)
@@ -205,14 +251,9 @@ if(BB_EBOOT)
         COMMAND ${CMAKE_COMMAND} -E touch ${GEN_DIR}/emitted.stamp
         DEPENDS bbrecomp ${BB_EBOOT} BYPRODUCTS ${GEN_STAMP} ${BB_GENERATED_SOURCES} VERBATIM)
     add_custom_target(bbgen DEPENDS ${GEN_DIR}/emitted.stamp)
-    # Presentation: SDL3 (zlib) window + Vulkan via volk (MIT) and the Khronos headers (Apache-2.0).
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
-    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(sdl3 GIT_REPOSITORY https://github.com/libsdl-org/SDL.git GIT_TAG release-3.2.8 GIT_SHALLOW TRUE)
+    # Presentation: SDL3 (see above) window + Vulkan via volk (MIT) and the Khronos headers (Apache-2.0).
     FetchContent_Declare(vulkan_headers GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git GIT_TAG v1.4.365 GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(sdl3 vulkan_headers)
+    FetchContent_MakeAvailable(vulkan_headers)
     FetchContent_Declare(volk GIT_REPOSITORY https://github.com/zeux/volk.git GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(volk)
     # VulkanMemoryAllocator (MIT), header-only; private to bbgpu so bbgame's compile flags stay untouched.
@@ -228,6 +269,14 @@ if(BB_EBOOT)
     target_link_libraries(bbgpu PRIVATE volk bbgcn)
     add_executable(bbgame EXCLUDE_FROM_ALL src/app/main.cpp ${BB_GENERATED_SOURCES})
     add_dependencies(bbgame bbgen)
+    # The eboot this binary is recompiled from: `bbgame --eboot-hash` prints it and a sidecar next to the exe lets the launcher match
+    # dumps to builds (bbgame.exe.eboot.sha256, rewritten after every link).
+    file(SHA256 ${BB_EBOOT} BB_EBOOT_SHA256)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${BB_EBOOT})
+    set_source_files_properties(src/app/main.cpp PROPERTIES COMPILE_DEFINITIONS BB_BUILD_EBOOT_SHA256="${BB_EBOOT_SHA256}")  # main.cpp only: a changed eboot must not recompile the shards
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/eboot.sha256 "${BB_EBOOT_SHA256}\n")
+    add_custom_command(TARGET bbgame POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/eboot.sha256 $<TARGET_FILE:bbgame>.eboot.sha256 VERBATIM)
     target_link_libraries(bbgame PRIVATE bbhle bbgpu)
     if(MSVC)
         target_link_options(bbgame PRIVATE /MAP)

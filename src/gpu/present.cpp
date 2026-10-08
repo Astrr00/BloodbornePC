@@ -1240,6 +1240,7 @@ bool init(int width, int height, const char* title) {
         std::fprintf(stderr, "gpu: SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
     }
+    if (const char* fs = std::getenv("BB_FULLSCREEN"); fs && fs[0] == '1') SDL_SetWindowFullscreen(g.window, true);  // start fullscreen (F11 toggles)
     if (replay) {
         double rate = g.fps > 0 ? g.fps : g.fps == 0 ? 30.0 * kMaxImages : 60;
         if (g.fps == -2)
