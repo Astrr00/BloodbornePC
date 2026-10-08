@@ -2,9 +2,10 @@
 // Closed-loop navigation for scripted play (debug tooling; everything stays off unless one of the env vars below is set).
 // BB_TELEMETRY=<file>: ~4 lines/s "T t= f= st= cam= yaw= pitch= pos= hp= cmd= stk= [sprint]" plus event lines "E t= <id> start|done|fail|stuck ...".
 // Commands (BB_PAD_LIVE lines, BB_ROUTE files; run in order; after "failfast 1" a failed one drops the rest of the queue):
-// goto <x> <z> [tol] [t=<s>] | ladder <x> <z> [<fx> <fz>] [down] | face <x> <z> | wait_load | wait <s> | press <btn> | tp <x> <y> <z> |
+// goto <x> <z> [tol] [t=<s>] | ladder <x> <z> [<fx> <fz>] [down] | face <x> <z> | wait_load | wait <s> | press <btn> | tp <x> <y> <z> | hwwatch <hex>... |
 // failfast 0|1; live "abort" (or "clear") drops the running and pending commands at once. BB_ROUTE_REC=<file>[,<metres>] records
 // the walk as a goto route (loops cut, simplified).
+#include "gpu/gpu_hooks.h"
 #include "gpu/pad.h"
 
 #ifdef _WIN32
@@ -483,6 +484,20 @@ bool nav_command(const char* line) {
         g_q.clear(), g_active = false;
         return true;
     }
+#if BB_DEV_TOOLS  // hwwatch <hex addr>... (up to 4): arm the 8-byte hardware write watchpoints (crash.cpp; BB_HWWATCH_ALL=1 prints every write with the guest call chain)
+    if (!std::strncmp(line, "hwwatch ", 8)) {
+        uint64_t a[4];
+        int n = 0;
+        for (const char* p = line + 8; *p && n < 4; ) {
+            char* e = nullptr;
+            a[n] = std::strtoull(p, &e, 16);
+            if (e == p) break;
+            ++n, p = e;
+        }
+        if (n && hooks().hw_watch) hooks().hw_watch(a, n);
+        return true;
+    }
+#endif
     Cmd c;
     const int ok = parse(line, c);
     if (ok > 0) push(c);

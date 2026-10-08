@@ -244,9 +244,10 @@ LONG WINAPI filter(EXCEPTION_POINTERS* e) {
 
 // BB_HWWATCH=<hex guest address>[,<address>...] (up to 4): hardware write watchpoints (DR0-DR3, 8 bytes, 8-aligned) on every thread of
 // the process. Reports writes whose value is not a plausible pointer/zero (unaligned or < 0x10000), i.e. the corruption of a free-list
-// link; see ROADMAP. BB_HWWATCH_ALL=1: every write (first 60), e.g. to find who fills a texture. The addresses can also be re-armed at
+// link; see ROADMAP. BB_HWWATCH_ALL=1: every write that changes the value (first 150), e.g. to find who fills a texture or changes an HP. Re-armed at
 // run time (hw_watch_set, used by BB_HWWATCH_VS in the GPU backend for per-frame pool addresses that are only known at draw time).
 uint64_t g_hw_addr[4] = {};
+uint64_t g_hw_last[4] = {};  // BB_HWWATCH_ALL: value seen at the previous hit per slot
 std::atomic<int> g_hw_n{0};
 std::atomic<uint32_t> g_hw_gen{0};
 bool g_hw_started = false;
@@ -255,8 +256,10 @@ LONG WINAPI hw_handler(EXCEPTION_POINTERS* e) {
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !hit) return EXCEPTION_CONTINUE_SEARCH;
     e->ContextRecord->Dr6 = 0;
     static const bool all = std::getenv("BB_HWWATCH_ALL") != nullptr;
-    const uint64_t a = g_hw_addr[std::countr_zero(hit)];
+    const int slot = std::countr_zero(hit);
+    const uint64_t a = g_hw_addr[slot];
     const uint64_t v = *reinterpret_cast<const uint64_t*>(a);
+    if (all && std::exchange(g_hw_last[slot], v) == v) return EXCEPTION_CONTINUE_EXECUTION;  // ALL: only writes that change the value
     static std::atomic<int> shown{0};
     if ((all || (v & 7) || (v && v < 0x10000)) && shown++ < (all ? 150 : 6)) {
         std::fprintf(stderr, "\nhwwatch: write of 0x%llx to 0x%llx, host rip = exe+0x%llx\n", (unsigned long long)v, (unsigned long long)a,
@@ -269,7 +272,7 @@ void hw_watch_set(const uint64_t* addrs, int n) {
     static std::mutex m;
     std::lock_guard lk(m);
     n = std::min(n, 4);
-    for (int i = 0; i < n; ++i) g_hw_addr[i] = addrs[i] & ~7ull;
+    for (int i = 0; i < n; ++i) g_hw_addr[i] = addrs[i] & ~7ull, g_hw_last[i] = ~0ull;
     g_hw_n = n;
     ++g_hw_gen;
     if (std::exchange(g_hw_started, true)) return;
