@@ -106,6 +106,24 @@ int main() {
             check("sop1 bit ops", translate(c, 5, env));
         }
     }
+    {  // SCC: ops that define SCC (GCN3 ISA) let a following s_cselect_b32 translate; ops that leave it alone must not (cselect has no SCC to read)
+        auto with_cselect = [](uint32_t first, bool* ok) {
+            const uint32_t c[] = {first, 0x85030100, 0x7E000203, 0xF8001C0F, 0x00000000, 0xBF810000};  // <first>; s_cselect_b32 s3, s0, s1; v0 = s3; exp mrt0
+            GcnEnv env; env.stage = ShStage::PS; env.user_sgprs = 2;
+            const Translation t = translate(c, 6, env);
+            if (t.error.empty()) check("scc", t);
+            *ok = t.error.empty();
+        };
+        bool ok = false;
+        for (uint32_t opc : {0x2u, 0x3u, 0x6u, 0x7u, 0x8u, 0x9u, 0xEu, 0x10u, 0x12u, 0x14u, 0x16u, 0x18u, 0x1Au, 0x1Cu, 0x1Eu, 0x20u, 0x22u, 0x27u, 0x28u, 0x2Cu}) {
+            with_cselect(0x80000000u | opc << 23 | 2u << 16 | 1u << 8, &ok);
+            assert(ok);
+        }
+        for (uint32_t opc : {0x7u, 0xDu, 0xFu, 0x34u}) { with_cselect(0xBE800000u | 2u << 16 | opc << 8, &ok); assert(ok); }  // not, bcnt0/1, abs
+        with_cselect(0xB7820001u, &ok); assert(ok);                                                                          // s_addk_i32 s2, 1
+        for (uint32_t opc : {0x24u, 0x26u}) { with_cselect(0x80000000u | opc << 23 | 2u << 16 | 1u << 8, &ok); assert(!ok); }  // bfm, mul
+        for (uint32_t opc : {0xBu, 0x11u, 0x13u, 0x15u, 0x17u, 0x19u, 0x1Au}) { with_cselect(0xBE800000u | 2u << 16 | opc << 8, &ok); assert(!ok); }  // brev, ff0/1, flbit, sext
+    }
     {  // unsupported input is reported, not silently mistranslated
         const uint32_t bad[] = {0xBF850001, 0xBF810000, 0xBF810000};  // s_cbranch_scc1 +1 (needs real control flow)
         GcnEnv env; env.stage = ShStage::CS;

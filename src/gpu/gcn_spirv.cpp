@@ -598,10 +598,16 @@ bool Xlat::salu(const Insn& in, const std::string& m) {
         Id a = 0, c = 0;
         if (in.fmt == GcnFmt::SOPK) {
             const int32_t imm = int16_t(d & 0xFFFF);
-            if (m == "s_addk_i32" || m == "s_mulk_i32") {  // dst = dst op simm16; ponytail: SCC (signed overflow of s_addk) is not produced
+            if (m == "s_addk_i32" || m == "s_mulk_i32") {  // dst = dst op simm16; s_addk sets SCC = signed overflow, s_mulk leaves it
                 Id cur = rd_s(dst, in, false, &sa, &ok);
                 if (!ok) return false;
-                wr_s(dst, op(m == "s_addk_i32" ? Op::OpIAdd : Op::OpIMul, U, {cur, cu(uint32_t(imm))}));
+                Id k = cu(uint32_t(imm)), res = op(m == "s_addk_i32" ? Op::OpIAdd : Op::OpIMul, U, {cur, k});
+                if (m == "s_addk_i32") {
+                    if (!scc_) scc_ = b.local_var_init(B, b.c_bool(false));
+                    Id ov = op(Op::OpBitwiseAnd, U, {op(Op::OpNot, U, {op(Op::OpBitwiseXor, U, {cur, k})}), op(Op::OpBitwiseXor, U, {cur, res})});
+                    st(scc_, op(Op::OpSLessThan, B, {op(Op::OpBitcast, I, {ov}), b.c_i32(0)}));
+                }
+                wr_s(dst, res);
                 return true;
             }
             if (starts_with(m, "s_cmpk_")) {  // s_cmpk_{eq,lg,gt,ge,lt,le}_{i32,u32} sdst, simm16 (sign-extended for i32, zero-extended for u32)
@@ -627,7 +633,10 @@ bool Xlat::salu(const Insn& in, const std::string& m) {
         if (in.fmt != GcnFmt::SOP1) c = rd_s((d >> 8) & 0xFF, in, false, &sb, &ok);
         if (!ok) return false;
         if (m == "s_mov_b32") return copy_s(dst, d & 0xFF, in);
-        if (m == "s_not_b32") { wr_s(dst, op(Op::OpNot, U, {a})); return true; }
+        // SCC = (result != 0) for the logic/shift/bit ops that define it (GCN3 ISA, SOP1/SOP2 "SCC = 1 if result is non-zero")
+        auto set_scc = [&](Id v) { if (!scc_) scc_ = b.local_var_init(B, b.c_bool(false)); st(scc_, v); };
+        auto set_nz = [&](Id res) { set_scc(op(Op::OpINotEqual, B, {res, cu(0)})); };
+        if (m == "s_not_b32") { Id res = op(Op::OpNot, U, {a}); set_nz(res); wr_s(dst, res); return true; }
         const bool both_const = sa.known && sb.known && sa.v.kind == ScalarVal::Const && sb.v.kind == ScalarVal::Const && !sa.v.add && !sb.v.add;
         Sym r;
         auto fold = [&](uint32_t v) { r.known = true; r.v.kind = ScalarVal::Const; r.v.a = v; };
@@ -668,10 +677,12 @@ bool Xlat::salu(const Insn& in, const std::string& m) {
             const bool is_signed = m.back() == '2' && m[m.size() - 3] == 'i', is_min = m.find("min") != std::string::npos;
             Id aa = is_signed ? op(Op::OpBitcast, I, {a}) : a, cc = is_signed ? op(Op::OpBitcast, I, {c}) : c;
             Id res = glsl(is_signed ? I : U, is_signed ? (is_min ? GLSLstd450SMin : GLSLstd450SMax) : (is_min ? GLSLstd450UMin : GLSLstd450UMax), {aa, cc});
+            // SCC = 1 if S0 was chosen as the minimum / maximum
+            set_scc(op(is_min ? (is_signed ? Op::OpSLessThan : Op::OpULessThan) : (is_signed ? Op::OpSGreaterThan : Op::OpUGreaterThan), B, {aa, cc}));
             wr_s(dst, is_signed ? bits(res) : res);
             return true;
         } else if (m == "s_bfe_u32" || m == "s_bfe_i32") {  // offset = c[4:0], width = c[22:16] (0..127); width 0 -> 0, width >= 32 -> everything above offset
-            const bool sg = m == "s_bfe_i32";                // ponytail: SCC (result != 0) is not produced
+            const bool sg = m == "s_bfe_i32";  // ponytail: unexecuted (validated only)
             Id off = op(Op::OpBitwiseAnd, U, {c, cu(31)}), wid = op(Op::OpBitwiseAnd, U, {op(Op::OpShiftRightLogical, U, {c, cu(16)}), cu(0x7F)});
             Id sh = op(sg ? Op::OpShiftRightArithmetic : Op::OpShiftRightLogical, U, {a, off});  // arithmetic: bits past bit 31 replicate the sign
             Id wide = op(Op::OpUGreaterThanEqual, B, {wid, cu(32)}), w31 = op(Op::OpBitwiseAnd, U, {wid, cu(31)});
@@ -684,34 +695,39 @@ bool Xlat::salu(const Insn& in, const std::string& m) {
                 Id mask = op(Op::OpSelect, U, {wide, cu(~0u), op(Op::OpISub, U, {op(Op::OpShiftLeftLogical, U, {cu(1), w31}), cu(1)})});
                 res = op(Op::OpBitwiseAnd, U, {sh, mask});
             }
+            set_nz(res);
             wr_s(dst, res);
             return true;
-        } else if (m == "s_bfm_b32") {  // ((1 << a[4:0]) - 1) << c[4:0]
+        } else if (m == "s_bfm_b32") {  // ((1 << a[4:0]) - 1) << c[4:0]; no SCC. ponytail: unexecuted
             Id msk = op(Op::OpISub, U, {op(Op::OpShiftLeftLogical, U, {cu(1), op(Op::OpBitwiseAnd, U, {a, cu(31)})}), cu(1)});
             wr_s(dst, op(Op::OpShiftLeftLogical, U, {msk, op(Op::OpBitwiseAnd, U, {c, cu(31)})}));
             return true;
         } else if (m == "s_orn2_b32") { o = Op::OpBitwiseOr; c = op(Op::OpNot, U, {c}); }
-        else if (m == "s_nand_b32" || m == "s_nor_b32" || m == "s_xnor_b32") {
-            wr_s(dst, op(Op::OpNot, U, {op(m == "s_nand_b32" ? Op::OpBitwiseAnd : m == "s_nor_b32" ? Op::OpBitwiseOr : Op::OpBitwiseXor, U, {a, c})}));
+        else if (m == "s_nand_b32" || m == "s_nor_b32" || m == "s_xnor_b32") {  // ponytail: unexecuted
+            Id res = op(Op::OpNot, U, {op(m == "s_nand_b32" ? Op::OpBitwiseAnd : m == "s_nor_b32" ? Op::OpBitwiseOr : Op::OpBitwiseXor, U, {a, c})});
+            set_nz(res);
+            wr_s(dst, res);
             return true;
-        } else if (m == "s_absdiff_i32") {
-            wr_s(dst, bits(glsl(I, GLSLstd450SAbs, {op(Op::OpBitcast, I, {op(Op::OpISub, U, {a, c})})})));
+        } else if (m == "s_absdiff_i32" || m == "s_abs_i32") {  // ponytail: unexecuted
+            Id v = m == "s_abs_i32" ? a : op(Op::OpISub, U, {a, c});
+            Id res = bits(glsl(I, GLSLstd450SAbs, {op(Op::OpBitcast, I, {v})}));
+            set_nz(res);
+            wr_s(dst, res);
             return true;
-        } else if (m == "s_abs_i32") {
-            wr_s(dst, bits(glsl(I, GLSLstd450SAbs, {op(Op::OpBitcast, I, {a})})));
-            return true;
-        } else if (m == "s_brev_b32") { wr_s(dst, op(Op::OpBitReverse, U, {a})); return true; }
+        } else if (m == "s_brev_b32") { wr_s(dst, op(Op::OpBitReverse, U, {a})); return true; }  // ponytail: unexecuted
         else if (m == "s_bcnt1_i32_b32" || m == "s_bcnt0_i32_b32") {
-            wr_s(dst, op(Op::OpBitCount, U, {m == "s_bcnt0_i32_b32" ? op(Op::OpNot, U, {a}) : a}));
+            Id res = op(Op::OpBitCount, U, {m == "s_bcnt0_i32_b32" ? op(Op::OpNot, U, {a}) : a});  // ponytail: unexecuted
+            set_nz(res);
+            wr_s(dst, res);
             return true;
-        } else if (m == "s_ff1_i32_b32" || m == "s_ff0_i32_b32") {  // lowest set (clear) bit, -1 if none (FindILsb(0) = -1)
+        } else if (m == "s_ff1_i32_b32" || m == "s_ff0_i32_b32") {  // lowest set (clear) bit, -1 if none (FindILsb(0) = -1); no SCC. ponytail: unexecuted
             wr_s(dst, glsl(U, GLSLstd450FindILsb, {m == "s_ff0_i32_b32" ? op(Op::OpNot, U, {a}) : a}));
             return true;
-        } else if (m == "s_flbit_i32_b32" || m == "s_flbit_i32") {  // leading zeros (b32) / leading sign copies (i32) counted from bit 31; -1 if none
+        } else if (m == "s_flbit_i32_b32" || m == "s_flbit_i32") {  // leading zeros (b32) / leading sign copies (i32) from bit 31; -1 if none; no SCC. ponytail: unexecuted
             Id msb = glsl(U, m == "s_flbit_i32" ? GLSLstd450FindSMsb : GLSLstd450FindUMsb, {a});
             wr_s(dst, op(Op::OpSelect, U, {op(Op::OpIEqual, B, {msb, cu(~0u)}), cu(~0u), op(Op::OpISub, U, {cu(31), msb})}));
             return true;
-        } else if (m == "s_sext_i32_i8" || m == "s_sext_i32_i16") {
+        } else if (m == "s_sext_i32_i8" || m == "s_sext_i32_i16") {  // no SCC. ponytail: unexecuted
             const uint32_t k = m == "s_sext_i32_i8" ? 24 : 16;
             wr_s(dst, op(Op::OpShiftRightArithmetic, U, {op(Op::OpShiftLeftLogical, U, {a, cu(k)}), cu(k)}));
             return true;
@@ -731,7 +747,12 @@ bool Xlat::salu(const Insn& in, const std::string& m) {
             st(scc_, op(co, B, {aa, cc}));
             return true;
         } else return fail("unsupported scalar instruction", &in);
-        wr_s(dst, op(o, U, {a, c}), r);
+        Id res = op(o, U, {a, c});
+        if (o == Op::OpIAdd || o == Op::OpISub) {  // s_add_i32 / s_sub_i32: SCC = signed overflow
+            Id x = o == Op::OpIAdd ? op(Op::OpNot, U, {op(Op::OpBitwiseXor, U, {a, c})}) : op(Op::OpBitwiseXor, U, {a, c});
+            set_scc(op(Op::OpSLessThan, B, {op(Op::OpBitcast, I, {op(Op::OpBitwiseAnd, U, {x, op(Op::OpBitwiseXor, U, {a, res})})}), b.c_i32(0)}));
+        } else if (o != Op::OpIMul) set_nz(res);  // s_mul_i32 leaves SCC alone
+        wr_s(dst, res, r);
         return true;
     }
     return fail("unsupported scalar format", &in);
