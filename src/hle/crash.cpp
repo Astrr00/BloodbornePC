@@ -9,12 +9,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <thread>
 #include <tuple>
+#include <utility>
 
 #include "hle/hle.h"
+#include "gpu/gpu_hooks.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -241,8 +244,12 @@ LONG WINAPI filter(EXCEPTION_POINTERS* e) {
 
 // BB_HWWATCH=<hex guest address>[,<address>...] (up to 4): hardware write watchpoints (DR0-DR3, 8 bytes, 8-aligned) on every thread of
 // the process. Reports writes whose value is not a plausible pointer/zero (unaligned or < 0x10000), i.e. the corruption of a free-list
-// link; see ROADMAP. BB_HWWATCH_ALL=1: every write (first 60), e.g. to find who fills a texture.
+// link; see ROADMAP. BB_HWWATCH_ALL=1: every write (first 60), e.g. to find who fills a texture. The addresses can also be re-armed at
+// run time (hw_watch_set, used by BB_HWWATCH_VS in the GPU backend for per-frame pool addresses that are only known at draw time).
 uint64_t g_hw_addr[4] = {};
+std::atomic<int> g_hw_n{0};
+std::atomic<uint32_t> g_hw_gen{0};
+bool g_hw_started = false;
 LONG WINAPI hw_handler(EXCEPTION_POINTERS* e) {
     const uint64_t hit = e->ContextRecord->Dr6 & 0xF;
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !hit) return EXCEPTION_CONTINUE_SEARCH;
@@ -251,26 +258,34 @@ LONG WINAPI hw_handler(EXCEPTION_POINTERS* e) {
     const uint64_t a = g_hw_addr[std::countr_zero(hit)];
     const uint64_t v = *reinterpret_cast<const uint64_t*>(a);
     static std::atomic<int> shown{0};
-    if ((all || (v & 7) || (v && v < 0x10000)) && shown++ < (all ? 60 : 6)) {
+    if ((all || (v & 7) || (v && v < 0x10000)) && shown++ < (all ? 150 : 6)) {
         std::fprintf(stderr, "\nhwwatch: write of 0x%llx to 0x%llx, host rip = exe+0x%llx\n", (unsigned long long)v, (unsigned long long)a,
                      (unsigned long long)(e->ContextRecord->Rip - reinterpret_cast<uint64_t>(GetModuleHandleA(nullptr))));
         print_thread("(hwwatch)", rt::current_context, rt::trace_ring, rt::last_import);
     }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
-void start_hw_watch(const char* list) {
-    int n = 0;
-    for (const char* p = list; p && *p && n < 4; p = std::strchr(p, ',') ? std::strchr(p, ',') + 1 : nullptr) g_hw_addr[n++] = std::strtoull(p, nullptr, 16) & ~7ull;
+void hw_watch_set(const uint64_t* addrs, int n) {
+    static std::mutex m;
+    std::lock_guard lk(m);
+    n = std::min(n, 4);
+    for (int i = 0; i < n; ++i) g_hw_addr[i] = addrs[i] & ~7ull;
+    g_hw_n = n;
+    ++g_hw_gen;
+    if (std::exchange(g_hw_started, true)) return;
     AddVectoredExceptionHandler(1, hw_handler);
-    std::thread([n] {
-        std::vector<DWORD> done;
+    std::thread([] {
+        std::vector<std::pair<DWORD, uint32_t>> done;  // thread id, generation applied
         for (;;) {
+            const uint32_t gen = g_hw_gen;
+            const int n = g_hw_n;
             HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
             THREADENTRY32 te = {sizeof te};
             if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
                 do {
                     if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
-                    if (std::find(done.begin(), done.end(), te.th32ThreadID) != done.end()) continue;
+                    auto it = std::find_if(done.begin(), done.end(), [&](auto& d) { return d.first == te.th32ThreadID; });
+                    if (it != done.end() && it->second == gen) continue;
                     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
                     if (!h) continue;
                     if (SuspendThread(h) != DWORD(-1)) {
@@ -281,7 +296,7 @@ void start_hw_watch(const char* list) {
                             ctx.Dr7 = 0;
                             for (int i = 0; i < n; ++i) *dr[i] = g_hw_addr[i], ctx.Dr7 |= (1ull << (2 * i)) | (1ull << (16 + 4 * i)) | (3ull << (18 + 4 * i));  // Li, write, 8 bytes
                             SetThreadContext(h, &ctx);
-                            done.push_back(te.th32ThreadID);
+                            if (it != done.end()) it->second = gen; else done.emplace_back(te.th32ThreadID, gen);
                         }
                         ResumeThread(h);
                     }
@@ -292,6 +307,12 @@ void start_hw_watch(const char* list) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }).detach();
+}
+void start_hw_watch(const char* list) {
+    uint64_t a[4];
+    int n = 0;
+    for (const char* p = list; p && *p && n < 4; p = std::strchr(p, ',') ? std::strchr(p, ',') + 1 : nullptr) a[n++] = std::strtoull(p, nullptr, 16);
+    hw_watch_set(a, n);
 }
 #else
 void handler(int sig, siginfo_t* si, void*) {
@@ -306,6 +327,7 @@ void install_crash_handler() {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(filter);
     if (const char* hw = std::getenv("BB_HWWATCH")) start_hw_watch(hw);
+    gpu::hooks().hw_watch = hw_watch_set;
 #else
     struct sigaction sa = {};
     sa.sa_sigaction = handler;

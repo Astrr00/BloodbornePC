@@ -71,6 +71,7 @@ struct Hooks {
     // false: the PM4 scan reads the arguments and calls dispatch
     bool (*dispatch_indirect)(const RegView& r, uint64_t args) = nullptr;
     void (*label)(uint64_t addr, uint64_t value, uint32_t bytes) = nullptr;  // completion label: written once the preceding GPU work ran
+    void (*hw_watch)(const uint64_t* addrs, int n) = nullptr;  // debug (BB_HWWATCH_VS): re-arm the hardware write watchpoints (up to 4) on every thread
 };
 
 inline Hooks& hooks() {

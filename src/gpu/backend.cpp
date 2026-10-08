@@ -634,6 +634,9 @@ struct Backend {
     // through cur_tess_ls / cur_tess_ds (0 = plain VS); the extra descriptor resources bind tess_lds / tess_idx.
     uint32_t cur_tess_ls = 0, cur_tess_ds = 0;
     struct TessBind { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize off = 0, size = 0; } tess_lds, tess_idx;
+    VkBuffer tess_dev[kMaxSlots] = {};  // per slot: the device-local LDS of large patch draws (tess_begin), 16 MB, created on first use
+    VmaAllocation tess_dev_alloc[kMaxSlots] = {};
+    VkBuffer tess_dev_lds();
     std::map<uint32_t, std::vector<uint16_t>> tess_grid;  // synthetic DS index buffers by level
     bool tess_begin(const RegView& r, const DrawCmd& in, DrawCmd& out, uint32_t& level, uint32_t& patches);
     void record_compute(const BoundShader& cs, const uint32_t* user, uint32_t x, uint32_t y, uint32_t z, bool ls = false);
@@ -2943,7 +2946,7 @@ VkBlendOp blend_op(uint32_t f) {
 // 1 PS), type, flags (1 scalar, 2 written, 4 VS strided buffer, 8 load_data, 16 mapped, 32/64 vertex_use bit 0/1), 0; u32 words[8];
 // u64 base, size, hash (pure vertex streams: the draw's record window, as bound); u32 n, then n bytes (every buffer but pure vertex
 // streams (vertex_use 1): up to 64 KiB, written ones up to 4 KiB).
-// ponytail: reads guest memory as is (pending GPU writes not settled); ranges capped at 16 MiB.
+// ponytail: reads guest memory as is (pending GPU writes not settled); ranges capped at 16 MiB. BB_CONST_DUMP_VS=<hex VS address>: only draws with that VS.
 void Backend::const_dump(uint32_t kind, uint64_t sh0, uint64_t sh1, const BoundShader* a, const BoundShader* b, const uint32_t* ua, const uint32_t* ub,
                          uint64_t rt0, uint64_t zb, uint32_t mask, uint32_t count, uint32_t inst) {
     static const char* e = std::getenv("BB_CONST_DUMP");
@@ -2954,6 +2957,8 @@ void Backend::const_dump(uint32_t kind, uint64_t sh0, uint64_t sh1, const BoundS
     static bool opened = false;
     static uint64_t first = ~0ull, cur = ~0ull;
     static uint32_t seq = 0;
+    static const uint64_t only_vs = std::getenv("BB_CONST_DUMP_VS") ? std::strtoull(std::getenv("BB_CONST_DUMP_VS"), nullptr, 16) : 0;  // debug: only draws with this VS
+    if (only_vs && sh0 != only_vs) return;
     const uint64_t fr = g_frame_counter.load(std::memory_order_relaxed);
     if (first == ~0ull) {
         if (double(fr) / 30 < std::atof(e)) return;
@@ -3477,6 +3482,27 @@ void Backend::draw(const RegView& r, const DrawCmd& d_in) {
     if (cdump_on)
         const_dump(0, (uint64_t(r.sh[kShVsLo + 1]) << 40) | (uint64_t(r.sh[kShVsLo]) << 8), ps_addr, &vs, &ps, &r.sh[kShVsUser], &r.sh[kShPsUser],
                    uint64_t(r.context[kCbColor0Base]) << 8, uint64_t(r.context[CTX(0x28050)]) << 8, r.context[kCbTargetMask], d.count, d.instances);
+    {  // debug BB_HWWATCH_VS=<vs hex>,<VS resource index>,<hex byte offset>,<hex key byte offset>,<key float>: for draws with that VS whose resource holds the
+        // float <key> at the key offset, arm hardware write watchpoints (every thread, see crash.cpp) on <offset>; each such draw re-arms the last 4
+        // distinct addresses, so a pool that rewrites the block at one of them within 4 draws is caught. Finds who writes e.g. one object's per-instance constants.
+        static unsigned long long hv = 0, hi = 0, ho = 0, hko = 0;
+        static float hkf = 0;
+        static const bool hw_on = [] { const char* e = std::getenv("BB_HWWATCH_VS"); return e && std::sscanf(e, "%llx,%llu,%llx,%llx,%f", &hv, &hi, &ho, &hko, &hkf) == 5; }();
+        if (hw_on && hooks().hw_watch && vs.e && ((uint64_t(r.sh[kShVsLo + 1]) << 40) | (uint64_t(r.sh[kShVsLo]) << 8)) == hv && hi < vs.words.size()) {
+            static uint64_t hw_list[4] = {};
+            static int hw_n = 0;
+            const uint32_t* w = vs.words[hi].data();
+            const uint64_t base = uint64_t(w[0]) | (uint64_t(w[1] & 0xFFF) << 32);
+            float kv = 0;
+            if (hooks().mem_valid && hooks().mem_valid(base + hko, 4)) std::memcpy(&kv, reinterpret_cast<const void*>(base + hko), 4);
+            if (std::fabs(kv - hkf) < 1e-3f && std::find(hw_list, hw_list + hw_n, base + ho) == hw_list + hw_n) {
+                if (hw_n == 4) { std::memmove(hw_list, hw_list + 1, 3 * sizeof hw_list[0]); --hw_n; }
+                hw_list[hw_n++] = base + ho;
+                hooks().hw_watch(hw_list, hw_n);
+                std::fprintf(stderr, "gpu: hwwatch_vs frame %llu: watching %d address(es), newest 0x%llx\n", (unsigned long long)g_frame_counter.load(std::memory_order_relaxed), hw_n, (unsigned long long)(base + ho));
+            }
+        }
+    }
     VkDescriptorSet set = VK_NULL_HANDLE;
     size_t idx_off = 0;
     bool idx_ok = false;
@@ -4085,6 +4111,18 @@ void Backend::record_compute(const BoundShader& cs, const uint32_t* user, uint32
     if (op_unsafe) cut(false);
 }
 
+VkBuffer Backend::tess_dev_lds() {
+    VkBuffer& b = tess_dev[slot];
+    if (b) return b;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = size_t(16) << 20;  // tess_begin's largest LDS
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (!vk_check(vmaCreateBuffer(vk().vma, &bci, &aci, &b, &tess_dev_alloc[slot], nullptr), "tessellation LDS buffer")) b = VK_NULL_HANDLE;
+    return b;
+}
+
 // Patch draw: runs the LS over all control points into the emulated LDS (compute pass) and turns the draw into an indexed triangle draw of the DS grid
 // (instance = patch). ponytail: the HS itself is not run. The game's HS only stores constant tess factors, equal to the HS register block's max/min
 // levels, so edge factors = max level; quad domain, ONE uniform integer level N and one control point per patch is all the corpus shows.
@@ -4096,6 +4134,7 @@ bool Backend::tess_begin(const RegView& r, const DrawCmd& in, DrawCmd& out, uint
     const uint32_t count = in.count;
     patches = count / std::max<uint32_t>(hs[7], 1);
     if (!patches || !(r.sh[kShLsLo] | r.sh[kShLsLo + 1]) || count > (1u << 20)) return false;
+    constexpr size_t kCpuZero = 256u << 10;
     const size_t idx_bytes = (4 * (size_t(count) + 1) + 255) & ~size_t(255);
     const size_t lds_bytes = std::clamp<size_t>(size_t(count) * 256, size_t(64) << 10, size_t(16) << 20);
     if (in.indexed) {
@@ -4104,7 +4143,10 @@ bool Backend::tess_begin(const RegView& r, const DrawCmd& in, DrawCmd& out, uint
         settle_pending(in.index_addr, in.index_addr + n, 3);  // may flush: before the ring allocation
     }
     size_t off = 0;
-    uint8_t* p = ring_alloc(idx_bytes + lds_bytes, 256, off);  // one allocation: a second one could flush and move the first to the other slot
+    // Large LDS (> kCpuZero) lives in a device-local buffer of the slot, not in the host-visible ring: the LS writes it, the DS reads it back
+    // (over PCIe the LS passes were ~5 ms each, GPU 80+ ms per frame in the Forbidden Woods). Small ones stay in the ring (CPU-zeroed).
+    const bool dev_lds = lds_bytes > kCpuZero;
+    uint8_t* p = ring_alloc(idx_bytes + (dev_lds ? 0 : lds_bytes), 256, off);  // one allocation: a second one could flush and move the first to the other slot
     if (!p) return false;
     tess_ring_flush = flushes;  // a flush from here on (e.g. in the LS pass's descriptor writes) leaves tess_idx/tess_lds in the other slot
     uint32_t* ids = reinterpret_cast<uint32_t*>(p);
@@ -4117,14 +4159,16 @@ bool Backend::tess_begin(const RegView& r, const DrawCmd& in, DrawCmd& out, uint
     // The emulated LDS starts zeroed. Small ones on the CPU (the ring is host-visible): then the LS pass needs no barrier before it
     // (record_compute `ls`). Large ones on the GPU (a CPU memset of up to 16 MB per patch draw was ~1 % of the render thread), ordered
     // by record_compute's barrier.
-    constexpr size_t kCpuZero = 256u << 10;
-    if (lds_bytes <= kCpuZero) std::memset(p + idx_bytes, 0, lds_bytes);
+    if (!dev_lds) std::memset(p + idx_bytes, 0, lds_bytes);
     else {
-        end_pass();  // (no transfer command inside a rendering instance)
-        vkCmdFillBuffer(rcb(), ring.buffer, off + idx_bytes, lds_bytes, 0);
+        VkBuffer lb = tess_dev_lds();
+        if (!lb) return false;
+        barrier();  // the buffer is shared by the slot's patch draws: earlier DS reads and LS writes are done (also ends the pass: no transfer command inside a rendering instance)
+        vkCmdFillBuffer(rcb(), lb, 0, lds_bytes, 0);
+        tess_lds = {lb, 0, lds_bytes};
     }
     tess_idx = {ring.buffer, off, idx_bytes};
-    tess_lds = {ring.buffer, off + idx_bytes, lds_bytes};
+    if (!dev_lds) tess_lds = {ring.buffer, off + idx_bytes, lds_bytes};
     cur_tess_ls = 1;
     BoundShader& ls = bs_ls;
     get_shader(ShStage::VS, r, ls);
@@ -4134,7 +4178,7 @@ bool Backend::tess_begin(const RegView& r, const DrawCmd& in, DrawCmd& out, uint
     for (uint32_t k = 0; k < count; ++k) max_id = std::max(max_id, ids[1 + k]);
     cur_vtx_records = uint64_t(max_id) + 1;  // the LS fetches by absolute vertex id (v0 = ids[gid]): bind records [0, max id] (no offset window)
     cur_vtx_first = 0;
-    record_compute(ls, &r.sh[kShLsUser], (count + 63) / 64, 1, 1, lds_bytes <= kCpuZero);
+    record_compute(ls, &r.sh[kShLsUser], (count + 63) / 64, 1, 1, !dev_lds);
     std::vector<uint16_t>& grid = tess_grid[level];
     if (grid.empty()) {  // N x N cells of two triangles over the (N+1)^2 grid vertices
         const uint32_t w = level + 1;
@@ -4194,16 +4238,21 @@ void Backend::census_frame() {
     std::fprintf(stderr, "scale: census of frame %llu (BB_SCALE_LOG)\n", (unsigned long long)g_frame_counter.load());
 }
 
-// BB_PIXEL=<hex 8-bit target base>:<x>:<y>:<first draw>: after every draw/dispatch read one pixel of that target back (synchronously) and log whatever changes it.
+// BB_PIXEL=<hex 8-bit target base>[+<base>...]:<x>:<y>:<first draw>: after every draw/dispatch read one pixel of each target back (synchronously) and log whatever changes it.
 void Backend::pixel_probe(const std::string& who) {
-    struct P { uint64_t rt = 0; uint32_t x = 0, y = 0; uint64_t from = 0; };
+    struct P { std::vector<uint64_t> rt; uint32_t x = 0, y = 0; uint64_t from = 0; };
     static const P pp = [] {
         P v;
-        unsigned long long rt = 0, from = 0; unsigned x = 0, y = 0;
-        if (const char* e = std::getenv("BB_PIXEL"); e && std::sscanf(e, "%llx:%u:%u:%llu", &rt, &x, &y, &from) >= 3) { v.rt = rt; v.x = x; v.y = y; v.from = from; }
+        unsigned long long from = 0; unsigned x = 0, y = 0;
+        if (const char* e = std::getenv("BB_PIXEL")) {
+            const char* c = e;
+            for (char* end; (v.rt.push_back(std::strtoull(c, &end, 16)), end != c) && *end == '+'; c = end + 1) {}
+            if (const char* col = std::strchr(e, ':'); col && std::sscanf(col, ":%u:%u:%llu", &x, &y, &from) >= 2) { v.x = x; v.y = y; v.from = from; }
+            else v.rt.clear();
+        }
         return v;
     }();
-    static uint64_t last = 0;
+    static std::map<uint64_t, uint64_t> last;
     static int n = 0;
     static const auto t0 = std::chrono::steady_clock::now();
     static const char* after_e = std::getenv("BB_PIXEL_AFTER");  // debug: start probing after N wall seconds ("p<N>": on the pad script clock)
@@ -4211,30 +4260,34 @@ void Backend::pixel_probe(const std::string& who) {
     static const long after_s = after_e ? std::atol(after_e + after_pad) : 0;
     if (draws < pp.from || n >= 80000 || (after_pad ? pad_script_clock() < double(after_s) : std::chrono::steady_clock::now() - t0 < std::chrono::seconds(after_s))) return;
     static bool said = false;
-    auto it = rts.find(pp.rt);
-    auto dit = dss.find(pp.rt);  // a depth buffer: its depth plane is read (float32)
-    const bool is_ds = it == rts.end() && dit != dss.end();
-    if (!said) { said = true; std::fprintf(stderr, "pixel: probing 0x%llx (%u,%u) from draw %llu: target %s\n", (unsigned long long)pp.rt, pp.x, pp.y, (unsigned long long)draws, it != rts.end() ? "found" : is_ds ? "found (depth)" : "not known (yet)"); }
-    if ((it == rts.end() && !is_ds) || !(is_ds ? dit->second : it->second)->initialised) return;
-    Image* im = (is_ds ? dit->second : it->second).get();
-    const bool px32 = is_ds ? im->format != VK_FORMAT_S8_UINT : im->format == VK_FORMAT_R8G8B8A8_UNORM || im->format == VK_FORMAT_R8G8B8A8_SRGB || im->format == VK_FORMAT_B8G8R8A8_UNORM || im->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || im->format == VK_FORMAT_R32_SFLOAT;
-    const bool px64 = !is_ds && (im->format == VK_FORMAT_R16G16B16A16_SFLOAT || im->format == VK_FORMAT_R32G32_SFLOAT);
-    if ((!px32 && !px64) || pp.x >= im->w || pp.y >= im->h) { std::fprintf(stderr, "pixel: unusable target format %d %ux%u\n", int(im->format), im->w, im->h); n = 80000; return; }
-    size_t off = 0;
-    if (!ring_alloc(16, 16, off)) return;
-    barrier();
-    VkBufferImageCopy cp{off, 0, 0, {VkImageAspectFlags(is_ds ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 0, 1}, {int32_t(pp.x), int32_t(pp.y), 0}, {1, 1, 1}};
-    vkCmdCopyImageToBuffer(rcb(), im->image, VK_IMAGE_LAYOUT_GENERAL, ring.buffer, 1, &cp);
-    barrier();
-    const size_t roff = off;
-    flush();
-    uint64_t px = 0;
-    std::memcpy(&px, ring.mapped + roff, px64 ? 8 : 4);
-    ++n;
-    if (px != last) {
-        std::fprintf(stderr, "pixel: #%llu: %s: %08llx -> %08llx\n", (unsigned long long)draws, who.c_str(), (unsigned long long)last, (unsigned long long)px);
-        last = px;
+    for (const uint64_t rt : pp.rt) {
+        auto it = rts.find(rt);
+        auto dit = dss.find(rt);  // a depth buffer: its depth plane is read (float32)
+        const bool is_ds = it == rts.end() && dit != dss.end();
+        if (!said) std::fprintf(stderr, "pixel: probing 0x%llx (%u,%u) from draw %llu: target %s\n", (unsigned long long)rt, pp.x, pp.y, (unsigned long long)draws, it != rts.end() ? "found" : is_ds ? "found (depth)" : "not known (yet)");
+        if ((it == rts.end() && !is_ds) || !(is_ds ? dit->second : it->second)->initialised) continue;
+        Image* im = (is_ds ? dit->second : it->second).get();
+        const bool px32 = is_ds ? im->format != VK_FORMAT_S8_UINT : im->format == VK_FORMAT_R8G8B8A8_UNORM || im->format == VK_FORMAT_R8G8B8A8_SRGB || im->format == VK_FORMAT_B8G8R8A8_UNORM || im->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || im->format == VK_FORMAT_R32_SFLOAT;
+        const bool px64 = !is_ds && (im->format == VK_FORMAT_R16G16B16A16_SFLOAT || im->format == VK_FORMAT_R32G32_SFLOAT);
+        if ((!px32 && !px64) || pp.x >= im->w || pp.y >= im->h) { std::fprintf(stderr, "pixel: unusable target format %d %ux%u\n", int(im->format), im->w, im->h); n = 80000; return; }
+        size_t off = 0;
+        if (!ring_alloc(16, 16, off)) return;
+        barrier();
+        VkBufferImageCopy cp{off, 0, 0, {VkImageAspectFlags(is_ds ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, 0, 1}, {int32_t(pp.x), int32_t(pp.y), 0}, {1, 1, 1}};
+        vkCmdCopyImageToBuffer(rcb(), im->image, VK_IMAGE_LAYOUT_GENERAL, ring.buffer, 1, &cp);
+        barrier();
+        const size_t roff = off;
+        flush();
+        uint64_t px = 0;
+        std::memcpy(&px, ring.mapped + roff, px64 ? 8 : 4);
+        ++n;
+        uint64_t& l = last[rt];
+        if (px != l) {
+            std::fprintf(stderr, "pixel: #%llu: [%llx] %s: %08llx -> %08llx\n", (unsigned long long)draws, (unsigned long long)rt, who.c_str(), (unsigned long long)l, (unsigned long long)px);
+            l = px;
+        }
     }
+    said = true;
 }
 
 void Backend::shutdown() {
