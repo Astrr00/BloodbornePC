@@ -214,18 +214,20 @@ void oneshot_flip(double now) {
     }
 #endif
     // BB_DEV_KILLALL_AT=<nav seconds>: once, at that time, every known enemy block is set to 0 HP (finds out whether a boss that cannot be located or hit
-    // dies and fires its death events from the HP value alone; a test aid, never combat evidence).
+    // dies and fires its death events from the HP value alone; a test aid, never combat evidence). BB_DEV_KILLALL_MAXHP=<n> restricts it to blocks whose
+    // max HP equals n (a targeted kill; the kill-all zeroes the whole map and taints the save).
     static const double killall_at = std::getenv("BB_DEV_KILLALL_AT") ? std::atof(std::getenv("BB_DEV_KILLALL_AT")) : -1;
+    static const int killall_maxhp = std::getenv("BB_DEV_KILLALL_MAXHP") ? std::atoi(std::getenv("BB_DEV_KILLALL_MAXHP")) : 0;
     static bool killall_done = false;
     if (killall_at > 0 && now >= killall_at && !killall_done) {
         killall_done = true;
         unsigned n = 0;
         for (Blk& b : blocks)
-            if (int32_t hp[2]; enemy(b.a, b.owner, hp) && hp[0] > 0) {
+            if (int32_t hp[2]; enemy(b.a, b.owner, hp) && hp[0] > 0 && (!killall_maxhp || hp[1] == killall_maxhp)) {
                 const int32_t zero = 0;
                 if (poke(b.a + 0xf8, &zero, 4)) ++n, b.one = true;
             }
-        std::fprintf(stderr, "nav @%.2f: oneshot: KILLALL set %u of %zu enemy blocks to 0 HP\n", now, n, blocks.size());
+        std::fprintf(stderr, "nav @%.2f: oneshot: KILLALL set %u of %zu enemy blocks to 0 HP (max HP filter %d)\n", now, n, blocks.size(), killall_maxhp);
     }
     for (Blk& b : blocks)
         if (int32_t hp[2]; enemy(b.a, b.owner, hp)) {
