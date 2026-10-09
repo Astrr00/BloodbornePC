@@ -7,7 +7,7 @@ recompiles `eboot.bin` to C++ and replaces the PS4 system libraries with its own
 You need a decrypted folder dump of your own copy, made by yourself.
 
 Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Detailed, dated evidence for everything below: [docs/ROADMAP.md](docs/ROADMAP.md)
-(written in German; it lists what has been shown to work and what has not).
+(it lists what has been shown to work and what has not).
 
 ## Progress
 
