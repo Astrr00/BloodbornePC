@@ -69,14 +69,18 @@ BloodbornePC/
 
 ### Installer (`bbinstall`)
 - Input: **unpacked** application folder with installed update 1.09 (`eboot.bin`, `sce_sys/param.sfo`,
-  `dvdroot_ps4/`), optional DLC folder.
+  `dvdroot_ps4/`), optional DLC folder; or the unpacked 01.00 base together with the unpacked 1.09 update folder (`--update`), which
+  the installer merges (update files replace base files at the same paths; validated virtually against the 1.09 manifest, then
+  installed as one tree).
 - Checks: `param.sfo` (TITLE_ID ∈ known Bloodborne IDs, `CATEGORY` `gd` or `gp` (merged dump carries
   the SFO of the update), `APP_VER=01.09`), `eboot.bin` is ELF or unencrypted fSELF, data folder (warning only,
   layout unconfirmed), DLC `CATEGORY=ac` with matching TITLE_ID, optional SHA-256 manifest (authoritative for
   completeness).
-- **PKG input is rejected.** The PFS content of a PS4 PKG is encrypted; opening it requires keys
-  or decryption. The project rules rule out both. The user unpacks their PKG with an external tool
-  of their choice.
+- **The installer and the launcher never decrypt PKGs.** The PFS content of a PS4 PKG is encrypted; opening it requires keys
+  or decryption, and the project rules rule both out (no keys, no decryption code in the repository). The launcher can drive an
+  **external extractor that the user supplies and configures** (argv template with `{pkg}` and `{out}`, no shell): it reads only
+  the plain PKG header (content id, title id) for sanity checks, runs the tool into a work folder owned by the launcher, and
+  validates the result against the manifests like any other dump.
 - Target directory: `%APPDATA%\BloodbornePC` or `$XDG_DATA_HOME/BloodbornePC`; subfolders `game/`, `dlc/`, `mods/`
   (override folders with the same structure as `game/`).
 
