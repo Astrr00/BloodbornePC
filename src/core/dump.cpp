@@ -225,8 +225,11 @@ void check_update(const fs::path& update, const std::string& game_title_id, Repo
         return;
     }
     const std::string tid = sfo->str("TITLE_ID").value_or(""), ver = sfo->str("APP_VER").value_or(""), cat = sfo->str("CATEGORY").value_or("");
-    if (!game_title_id.empty() && tid != game_title_id)
-        r.add(Severity::Error, "Update folder is not for this game (title " + tid + " vs " + game_title_id + ").");
+    if (!game_title_id.empty() && tid != game_title_id) {
+        const bool known = std::any_of(std::begin(kKnownTitleIds), std::end(kKnownTitleIds), [&](const char* id) { return tid == id; });
+        r.add(Severity::Error, "Update folder is not for this game (title " + tid + " vs " + game_title_id + ")." +
+                                   (known ? " It belongs to another Bloodborne release; the update must match the base release." : ""));
+    }
     if (ver != kRequiredAppVer)
         r.add(Severity::Error, "Update is version " + (ver.empty() ? "unknown" : ver) + ", expected " + kRequiredAppVer + ".");
     if (cat != "gp")
