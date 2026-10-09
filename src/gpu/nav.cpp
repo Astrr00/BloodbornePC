@@ -196,6 +196,13 @@ void oneshot_flip(double now) {
             if (int32_t hp[2]; enemy(a, o, hp)) {
                 const auto it = std::find_if(old.begin(), old.end(), [&](const Blk& k) { return k.a == a && k.owner == o; });
                 blocks.push_back({a, o, it != old.end() && it->one});
+                if (it == old.end() && hp[1] >= 1000) {  // a new sizeable enemy (boss candidates): where is it? (physics proxy path as the player's, feet at +0x70)
+                    float f[3] = {0, 0, 0};
+                    const uint64_t pr = follow(o, g_paths[0]);
+                    if (pr) peek(pr + 0x70, f, 12);
+                    std::fprintf(stderr, "nav @%.2f: oneshot: new block %llx owner %llx ovt %llx HP %d/%d pos %.1f,%.1f,%.1f%s\n", now, (unsigned long long)a, (unsigned long long)o,
+                                 (unsigned long long)ld64(o), hp[0], hp[1], f[0], f[1], f[2], pr ? "" : " (no proxy)");
+                }
             } else if (o != x && skipped < 24) {
                 int32_t h[2] = {0, 0};
                 peek(a + 0xf8, h, 8);
