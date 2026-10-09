@@ -19,7 +19,7 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Detailed, dated evid
 | Installer (hash check, copy, error messages) | 85 % | works; a build in a fresh directory has not been run yet |
 | Windows 11 (Windows 10 untested) | 85 % | runs natively, saves, audio and movies work; a few rendering oddities and untranslated shaders remain |
 | Linux / Steam Deck | 10 % | libraries and tests build in CI; the game has not been run with a window on Linux |
-| Base game, playthrough | 78 % | 7 of 10 required bosses defeated in real combat, an 8th (One Reborn) only killed with a test aid that sets enemy HP to 1; the Lecture Building and the Nightmare of Mensis (two lamps) are entered; the ending is untested |
+| Base game, playthrough | 80 % | 7 of 10 required bosses defeated in real combat; One Reborn and Micolash were only killed with test aids (enemy HP set to 1 / 0), and several stretches were bridged by teleporting; Mergo's Wet Nurse, Gehrman and the ending are untested |
 | The Old Hunters (DLC) | 45 % | all four DLC bosses were reached and killed, but only with a test aid that sets enemy HP to 1, and several stretches were bridged by teleporting; no DLC boss has been fought for real; credits/ending not observed |
 | Frame rate (30 Hz simulation, up to 165 Hz output) | 85 % | interpolated output measured at 165 Hz; not every rate checked in every area |
 | Resolution up to 4K, post effects | 90 % | internal 4K and FSR 1 upscaling work |
