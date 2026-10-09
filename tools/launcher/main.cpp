@@ -4,6 +4,7 @@
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,7 @@
 #include "core/bbconfig.h"
 #include "core/install.h"
 #include "imgui.h"
+#include "pkg.h"
 #include "strings.h"
 
 #ifdef _WIN32
@@ -101,10 +103,11 @@ bool write_png(const char* path, const uint8_t* rgba, int w, int h) {
 
 // ---- add / install flow (runs on a worker thread, polled by the UI) --------------------------------------------------------------------
 struct AddState {
-    enum Phase { Checking, Checked, Installing, Installed, Failed };
-    std::atomic<Phase> phase{Checking};
-    fs::path dump, dlc, manifest;  // dlc: optional add-on folder
-    std::string title_id, app_ver, title, hint, current;
+    using enum AddPhase;
+    std::atomic<AddPhase> phase{Checking};
+    bool registered = false;  // UI thread: the finished install has been added to the game list
+    fs::path dump, dlc, update, manifest;  // dlc / update: optional add-on and 1.09 update folders
+    std::string title_id, app_ver, upd_ver, title, hint, current;
     bb::dump::Report report;
     std::vector<bb::dump::Finding> log;  // install messages
     uintmax_t need = 0;
@@ -134,10 +137,12 @@ void run_check(AddState& st, const fs::path& install_root) {
     st.title_id = pre.title_id, st.app_ver = pre.app_ver;
     std::string t, v, title;
     if (read_sfo_info(st.dump, t, v, title)) st.title = title;
-    st.manifest = find_manifest(st.title_id, st.app_ver);
-    bb::dump::Source src{st.dump, std::nullopt, std::nullopt};
+    if (!st.update.empty()) read_sfo_info(st.update, t, st.upd_ver, title);
+    st.manifest = find_manifest(st.title_id, st.update.empty() ? st.app_ver : bb::dump::kRequiredAppVer);  // with an update the result is 01.09
+    bb::dump::Source src{st.dump, std::nullopt, std::nullopt, std::nullopt};
     if (!st.manifest.empty()) src.manifest = st.manifest;
     if (!st.dlc.empty()) src.dlc = st.dlc;
+    if (!st.update.empty()) src.update = st.update;
     auto rep = bb::dump::validate(src, [&](size_t d, size_t n, const std::string& p) {
         st.done = d, st.total = n;
         std::lock_guard l(st.m);
@@ -158,7 +163,8 @@ void run_check(AddState& st, const fs::path& install_root) {
 
 void run_install(AddState& st) {
     bb::dump::Source src{st.dump, st.manifest.empty() ? std::nullopt : std::optional<fs::path>(st.manifest),
-                         st.dlc.empty() ? std::nullopt : std::optional<fs::path>(st.dlc)};
+                         st.dlc.empty() ? std::nullopt : std::optional<fs::path>(st.dlc),
+                         st.update.empty() ? std::nullopt : std::optional<fs::path>(st.update)};
     const bool ok = bb::dump::install(
         src, st.dest,
         [&](size_t d, size_t n, const std::string& p) {
@@ -178,8 +184,62 @@ void run_install(AddState& st) {
 struct Picked {
     std::mutex m;
     std::string path;
-    int kind = 0;  // 1 dump, 2 build folder, 3 save folder, 4 DLC folder
+    int kind = 0;  // 1 dump, 2 build folder, 3 save folder, 4 DLC folder, 5 update folder, 6-8 game/DLC/update PKG, 9 extractor program
 };
+
+// One PKG file chosen in the dialog; the plain header is read whenever the path text changes.
+struct PkgSlot {
+    char path[1024] = {};
+    std::string shown, err;
+    PkgInfo info;
+    bool ok = false;
+    void refresh() {
+        if (shown == path) return;
+        shown = path, err.clear(), info = {}, ok = false;
+        if (path[0]) ok = read_pkg_header(path, info, err);
+    }
+};
+
+// Extraction of the chosen PKGs by the external extractor (worker thread; the UI polls).
+struct PkgJob {
+    std::atomic<bool> cancel{false}, finished{false}, ok{false};
+    bool handled = false;  // UI thread only
+    std::mutex m;          // guards status, error, log, work
+    std::string status, error;
+    fs::path log, work;
+    std::future<void> job;
+};
+
+void run_extract(PkgJob& j, std::vector<std::string> tmpl, std::array<fs::path, 3> pkgs, fs::path work, fs::path data_dir) {
+    static const char* const kName[] = {"Game", "DLC", "Update"};
+    static const PkgKind kKind[] = {PkgKind::Game, PkgKind::Dlc, PkgKind::Update};
+    for (int i = 0; i < 3; ++i) {
+        if (pkgs[i].empty()) continue;
+        const fs::path log = work_log(work, kKind[i]);  // outside the work folder: survives the cleanup below
+        {
+            std::lock_guard l(j.m);
+            j.status = std::string("Extracting the ") + kName[i] + " PKG ...";
+            j.log = log;
+        }
+        const ExtractResult r = run_extractor(tmpl, pkgs[i], work / kind_name(kKind[i]), kKind[i], log, &j.cancel);
+        if (!r.ok) {
+            std::string e;
+            const bool cleaned = remove_work_dir(work, data_dir, e, true);  // only the folder this run created (marker + parent checked); logs stay
+            std::lock_guard l(j.m);
+            j.error = r.error == "Cancelled." ? r.error : std::string(kName[i]) + " PKG: " + r.error;
+            if (!cleaned) j.error += "\nThe partial output could not be removed: " + e + " (see 'Extracted PKG files' on the Games tab).";
+            j.finished = true;
+            return;
+        }
+    }
+    j.ok = true;
+    j.finished = true;
+}
+
+bool is_under(const fs::path& p, const fs::path& root) {
+    const fs::path rel = p.lexically_normal().lexically_relative(root.lexically_normal());
+    return !rel.empty() && *rel.begin() != ".." && !rel.is_absolute();
+}
 
 struct App {
     fs::path cfg_dir, data_dir, cfg_file;
@@ -189,7 +249,14 @@ struct App {
     std::future<std::vector<Build>> scan_f;
     std::future<std::vector<Game>> hash_f;
     std::shared_ptr<AddState> add;
-    char add_path[1024] = {}, add_dlc[1024] = {};
+    char add_path[1024] = {}, add_dlc[1024] = {}, add_update[1024] = {};
+    PkgSlot pkg[3];  // game, DLC, update
+    char extractor[1024] = {};
+    std::shared_ptr<PkgJob> pkgjob;
+    std::string pkg_msg, pkg_tail_text;
+    uint64_t pkg_tail_at = 0;
+    bool auto_extract = false, pending_check = false, show_delete = false;
+    fs::path delete_target;  // work folder the confirmation popup is about (empty = popup closed)
     Picked picked;
     SDL_Window* window = nullptr;
 
@@ -212,7 +279,65 @@ struct App {
     }
     const Build* build_for(const Game& g) const { return match_build(builds, g.eboot_sha); }
     bool busy() const { return scan_f.valid() || hash_f.valid(); }
-    void save() { save_config(cfg_file, cfg); }
+    void save() {
+        cfg.pkg_extractor = extractor, cfg.pkg_game = pkg[0].path, cfg.pkg_dlc = pkg[1].path, cfg.pkg_update = pkg[2].path;
+        save_config(cfg_file, cfg);
+    }
+    void load_pkg_fields() {
+        std::snprintf(extractor, sizeof extractor, "%s", cfg.pkg_extractor.c_str());
+        std::snprintf(pkg[0].path, sizeof pkg[0].path, "%s", cfg.pkg_game.c_str());
+        std::snprintf(pkg[1].path, sizeof pkg[1].path, "%s", cfg.pkg_dlc.c_str());
+        std::snprintf(pkg[2].path, sizeof pkg[2].path, "%s", cfg.pkg_update.c_str());
+    }
+    void start_extract() {
+        pkg_msg.clear();
+        if (pkgjob && pkgjob->job.valid()) return;
+        for (PkgSlot& p : pkg) p.refresh();
+        if (!pkg[0].path[0]) return void(pkg_msg = T(S::pkg_need_game));
+        for (int i = 0; i < 3; ++i)
+            if (pkg[i].path[0] && !pkg[i].ok) return void(pkg_msg = pkg[i].err);
+        const fs::path gp = pkg[0].path, dp = pkg[1].path, up = pkg[2].path;
+        for (const auto& f : check_pkg_set(pkg[0].info, gp, pkg[1].path[0] ? &pkg[1].info : nullptr, &dp, pkg[2].path[0] ? &pkg[2].info : nullptr, &up))
+            if (f.severity == Severity::Error) return void(pkg_msg = f.message);
+        std::string e;
+        const auto tmpl = split_command(extractor, e);
+        if (e.empty()) e = check_template(tmpl);
+        if (!e.empty()) return void(pkg_msg = e);
+        uintmax_t bytes = 0;
+        for (const PkgSlot& p : pkg)
+            if (p.path[0]) bytes += p.info.size;
+        if (const std::string sp = check_extract_space(bytes, data_dir); !sp.empty()) return void(pkg_msg = sp);
+        const fs::path work = make_work_dir(data_dir, new_run_id(), e);
+        if (work.empty()) return void(pkg_msg = e);
+        save();
+        pkgjob = std::make_shared<PkgJob>();
+        pkgjob->work = work;
+        pkgjob->job = std::async(std::launch::async, [j = pkgjob, tmpl, pkgs = std::array<fs::path, 3>{gp, pkg[1].path[0] ? dp : fs::path(), pkg[2].path[0] ? up : fs::path()},
+                                                      work, dd = data_dir] { run_extract(*j, tmpl, pkgs, work, dd); });
+    }
+    void poll_extract() {
+        if (!pkgjob || !pkgjob->finished || pkgjob->handled) return;
+        pkgjob->handled = true;
+        if (pkgjob->job.valid()) pkgjob->job.get();
+        if (!pkgjob->ok) return;
+        std::snprintf(add_path, sizeof add_path, "%s", (pkgjob->work / "game").string().c_str());
+        std::snprintf(add_dlc, sizeof add_dlc, "%s", pkg[1].path[0] ? (pkgjob->work / "dlc").string().c_str() : "");
+        std::snprintf(add_update, sizeof add_update, "%s", pkg[2].path[0] ? (pkgjob->work / "update").string().c_str() : "");
+        save();
+        start_check();
+    }
+    void browse_file(int kind, bool pkg_filter) {
+        static const SDL_DialogFileFilter kPkg[] = {{"PS4 packages (*.pkg)", "pkg"}, {"All files", "*"}};
+        picked.kind = kind;
+        SDL_ShowOpenFileDialog(
+            +[](void* ud, const char* const* list, int) {
+                auto* p = static_cast<Picked*>(ud);
+                if (!list || !list[0]) return;
+                std::lock_guard l(p->m);
+                p->path = list[0];
+            },
+            &picked, window, pkg_filter ? kPkg : nullptr, pkg_filter ? 2 : 0, nullptr, false);
+    }
 
     void start_scan() {
         if (scan_f.valid()) return;
@@ -259,6 +384,13 @@ struct App {
                     if (g.id == h.id && g.path == h.path) g.eboot_sha = h.eboot_sha, g.eboot_size = h.eboot_size, g.eboot_mtime = h.eboot_mtime;
             save();
         }
+        poll_extract();
+        if (add && add->phase == AddPhase::Installed && !add->registered) {  // never orphan a finished install, whatever the dialog is doing
+            if (add->job.valid()) add->job.get();
+            add->registered = true;
+            add_game(add->dest / "game");
+        }
+        if (pending_check && !(add && check_request(add->phase, add->registered) == CheckAction::Defer)) start_check();
         int code = 0;
         if (proc.valid && poll(proc, code)) {
             has_exit = true, last_exit = code;
@@ -280,19 +412,37 @@ struct App {
             } else if (picked.kind == 4) {
                 std::snprintf(add_dlc, sizeof add_dlc, "%s", p.c_str());
                 if (add_path[0]) start_check();
+            } else if (picked.kind == 5) {
+                std::snprintf(add_update, sizeof add_update, "%s", p.c_str());
+                if (add_path[0]) start_check();
+            } else if (picked.kind >= 6 && picked.kind <= 8) {
+                std::snprintf(pkg[picked.kind - 6].path, sizeof pkg[0].path, "%s", p.c_str());
+                save();
+            } else if (picked.kind == 9) {
+                std::snprintf(extractor, sizeof extractor, "%s", template_for_program(p).c_str());
+                save();
             }
         }
     }
+    // Replaces the dialog state with a fresh check. While a check/install runs (or a finished install is not yet registered) the request
+    // waits (pending_check) instead of orphaning that job.
     void start_check() {
+        if (add && check_request(add->phase, add->registered) == CheckAction::Defer) {
+            pending_check = true;
+            return;
+        }
+        pending_check = false;
+        if (add && add->job.valid()) add->job.wait();
         add = std::make_shared<AddState>();
         add->dump = fs::path(add_path);
         add->dlc = fs::path(add_dlc);
+        add->update = fs::path(add_update);
         open_add = true;
         add->job = std::async(std::launch::async, [st = add, root = data_dir / "games"] { run_check(*st, root); });
     }
     void start_install() {
         AddState* st = add.get();
-        st->dest = data_dir / "games" / make_game_id(st->title_id, st->app_ver, cfg.games);
+        st->dest = data_dir / "games" / make_game_id(st->title_id, st->update.empty() ? st->app_ver : bb::dump::kRequiredAppVer, cfg.games);
         st->phase = AddState::Installing;
         st->done = 0, st->total = 0;
         st->cancel = false;
@@ -403,7 +553,7 @@ void games_tab(App& a) {
     }
     ImGui::Spacing();
     if (ImGui::Button(T(S::add_game))) {
-        a.add_path[0] = a.add_dlc[0] = 0;
+        a.add_path[0] = a.add_dlc[0] = a.add_update[0] = 0;
         a.add.reset();
         a.open_add = true;
     }
@@ -417,6 +567,21 @@ void games_tab(App& a) {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", T(S::remove_hint));
 
+    if (const auto work = list_work_dirs(a.data_dir); !work.empty()) {
+        ImGui::Separator();
+        ImGui::TextUnformatted(T(S::pkg_work_note));
+        const bool locked = (a.pkgjob && a.pkgjob->job.valid() && !a.pkgjob->finished) || (a.add && check_request(a.add->phase, true) == CheckAction::Defer);
+        for (const fs::path& w : work) {
+            ImGui::PushID(w.string().c_str());
+            ImGui::BeginDisabled(locked);
+            if (ImGui::Button(T(S::pkg_delete))) a.delete_target = w, a.show_delete = true;
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextUnformatted(w.string().c_str());
+            ImGui::PopID();
+        }
+        if (!a.pkg_msg.empty()) ImGui::TextColored(kRed, "%s", a.pkg_msg.c_str());
+    }
     if (sel && !a.build_for(*sel) && !sel->eboot_sha.empty() && !a.busy()) {
         ImGui::Separator();
         ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
@@ -623,28 +788,112 @@ void cheats_tab(App& a) {
     }
 }
 
+// "From PKG files": three pickers, the external extractor command, and the extraction progress.
+void pkg_section(App& a) {
+    ImGui::TextUnformatted(T(S::pkg_section));
+    hint(T(S::pkg_note));
+    static const S kHint[] = {S::pkg_game, S::pkg_dlc, S::pkg_update};
+    const bool running = a.pkgjob && a.pkgjob->job.valid() && !a.pkgjob->finished;
+    ImGui::BeginDisabled(running);
+    for (int i = 0; i < 3; ++i) {
+        ImGui::PushID(i);
+        PkgSlot& p = a.pkg[i];
+        ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 9);
+        ImGui::InputTextWithHint("##pkg", T(kHint[i]), p.path, sizeof p.path);
+        if (ImGui::IsItemDeactivatedAfterEdit()) a.save();
+        ImGui::SameLine();
+        if (ImGui::Button(T(S::browse))) a.browse_file(6 + i, true);
+        p.refresh();
+        if (p.path[0]) {
+            if (!p.ok) ImGui::TextColored(kRed, "%s", p.err.c_str());
+            else ImGui::TextDisabled("%s%s%s", p.info.content_id.c_str(), p.info.title_id.empty() ? "" : "  (title ", p.info.title_id.empty() ? "" : (p.info.title_id + ")").c_str());
+        }
+        ImGui::PopID();
+    }
+    const fs::path dlc_path = a.pkg[1].path, upd_path = a.pkg[2].path;
+    for (const auto& f : [&] {
+             std::vector<bb::dump::Finding> v;
+             if (a.pkg[0].path[0] && a.pkg[0].ok)
+                 v = check_pkg_set(a.pkg[0].info, a.pkg[0].path, a.pkg[1].path[0] && a.pkg[1].ok ? &a.pkg[1].info : nullptr, &dlc_path,
+                                   a.pkg[2].path[0] && a.pkg[2].ok ? &a.pkg[2].info : nullptr, &upd_path);
+             return v;
+         }())
+        if (f.severity == Severity::Error) ImGui::TextColored(kRed, "%s", f.message.c_str());
+    ImGui::TextUnformatted(T(S::pkg_extractor));
+    ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 9);
+    ImGui::InputTextWithHint("##extractor", "python C:\\path\\tool.py {pkg} {out}", a.extractor, sizeof a.extractor);
+    if (ImGui::IsItemDeactivatedAfterEdit()) a.save();
+    ImGui::SameLine();
+    if (ImGui::Button((std::string(T(S::browse)) + "##ext").c_str())) a.browse_file(9, false);
+    ImGui::EndDisabled();
+    hint(T(S::pkg_extractor_hint));
+    if (!running) {
+        if (ImGui::Button(T(S::pkg_extract)) || a.auto_extract) a.start_extract(), a.auto_extract = false;
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", T(S::pkg_space_note));
+    } else {
+        if (ImGui::Button(T(S::cancel))) a.pkgjob->cancel = true;
+        std::string status;
+        fs::path log;
+        {
+            std::lock_guard l(a.pkgjob->m);
+            status = a.pkgjob->status, log = a.pkgjob->log;
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(status.c_str());
+        if (SDL_GetTicks() > a.pkg_tail_at) {  // the live tail of the extractor output, twice a second
+            a.pkg_tail_at = SDL_GetTicks() + 500;
+            a.pkg_tail_text.clear();
+            for (const std::string& l : tail_lines(log, 4)) a.pkg_tail_text += l.substr(0, 160) + "\n";
+        }
+        ImGui::TextDisabled("%s", a.pkg_tail_text.c_str());
+    }
+    if (!a.pkg_msg.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        ImGui::TextWrapped("%s", a.pkg_msg.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (a.pkgjob && a.pkgjob->finished) {
+        std::lock_guard l(a.pkgjob->m);
+        if (!a.pkgjob->ok) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            ImGui::TextWrapped("%s", a.pkgjob->error.c_str());
+            ImGui::PopStyleColor();
+        }
+        else ImGui::TextColored(kGreen, "%s", T(S::pkg_done));
+    }
+}
+
 void add_popup(App& a) {
     if (a.open_add) ImGui::OpenPopup(T(S::add_title)), a.open_add = false;
     const ImVec2 ds = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ds.x * 0.9f, ds.y * 0.88f));
     if (!ImGui::BeginPopupModal(T(S::add_title), nullptr, ImGuiWindowFlags_NoSavedSettings)) return;
+    pkg_section(a);
+    ImGui::Separator();
+    // Folder fields stay locked while an extraction runs (its result is about to fill them) and while a check/install is in progress.
+    const bool extracting = a.pkgjob && a.pkgjob->job.valid() && !a.pkgjob->finished;
+    ImGui::BeginDisabled(extracting);
+    ImGui::TextUnformatted(T(S::folders_section));
     hint(T(S::add_hint));
     ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 16);
     ImGui::InputText("##path", a.add_path, sizeof a.add_path);
     ImGui::SameLine();
     if (ImGui::Button(T(S::browse))) a.browse(1);
     ImGui::SameLine();
-    if (ImGui::Button(T(S::check)) && a.add_path[0]) {
-        if (a.add) a.add->cancel = true;
-        if (a.add && a.add->job.valid()) a.add->job.wait();
-        a.start_check();
-    }
+    if (ImGui::Button(T(S::check)) && a.add_path[0]) a.start_check();
     ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 16);
     ImGui::InputTextWithHint("##dlc", T(S::dlc_folder), a.add_dlc, sizeof a.add_dlc);
     ImGui::SameLine();
     if (ImGui::Button((std::string(T(S::browse)) + "##dlc").c_str())) a.browse(4);
     ImGui::TextDisabled("%s", T(S::dlc_hint));
+    ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 16);
+    ImGui::InputTextWithHint("##upd", T(S::update_folder), a.add_update, sizeof a.add_update);
+    ImGui::SameLine();
+    if (ImGui::Button((std::string(T(S::browse)) + "##upd").c_str())) a.browse(5);
+    ImGui::TextDisabled("%s", T(S::update_hint));
+    ImGui::EndDisabled();
     ImGui::Separator();
     AddState* st = a.add.get();
     bool close = false;
@@ -666,7 +915,10 @@ void add_popup(App& a) {
         }
         if (st->phase != AddState::Checking) {
             std::lock_guard l(st->m);
-            if (!st->title_id.empty()) {
+            if (!st->title_id.empty() && !st->update.empty()) {
+                ImGui::TextColored(st->report.ok() ? kGreen : kYellow, "%s%s %s v%s + update v%s -> v%s after merge", T(S::version_recognised), st->title.c_str(),
+                                   st->title_id.c_str(), st->app_ver.c_str(), st->upd_ver.c_str(), bb::dump::kRequiredAppVer);
+            } else if (!st->title_id.empty()) {
                 ImGui::TextColored(st->app_ver == bb::dump::kRequiredAppVer ? kGreen : kYellow, "%s%s %s v%s", T(S::version_recognised), st->title.c_str(),
                                    st->title_id.c_str(), st->app_ver.c_str());
             }
@@ -691,6 +943,7 @@ void add_popup(App& a) {
             if (st->phase == AddState::Installed) ImGui::TextColored(kGreen, "%s", T(S::install_done));
         }
         ImGui::EndChild();
+        const auto extracted = [&](const AddState* x) { return is_under(x->dump, a.data_dir / "pkg_work") || (!x->dlc.empty() && is_under(x->dlc, a.data_dir / "pkg_work")); };
         const bool checked = st->phase == AddState::Checked, failed_install = st->phase == AddState::Failed;
         const bool can_install = (checked || failed_install) && st->report.ok() && !working && (!st->avail || *st->avail >= st->need);
         ImGui::BeginDisabled(!can_install);
@@ -698,19 +951,17 @@ void add_popup(App& a) {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", T(S::install_hint));
         ImGui::SameLine();
-        const bool can_place = (checked || failed_install) && st->has_eboot && !working;
+        const bool can_place = (checked || failed_install) && st->has_eboot && !working && st->update.empty() && !extracted(st);  // an update can only be merged by Install; extracted files are temporary
         ImGui::BeginDisabled(!can_place);
         if (ImGui::Button(st->report.ok() ? T(S::use_in_place) : T(S::use_in_place_unverified))) {
             a.add_game(st->dump, st->dlc);
             close = true;
         }
         ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", T(S::use_in_place_hint));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", !st->update.empty() ? T(S::use_in_place_update) : extracted(st) ? T(S::use_in_place_pkg) : T(S::use_in_place_hint));
         ImGui::SameLine();
-        if (st->phase == AddState::Installed) {
-            a.add_game(st->dest / "game");
-            close = true;
-        }
+        if (st->phase == AddState::Installed && st->registered) close = true;  // registered by poll_jobs
         if (st->phase == AddState::Installing && ImGui::Button(T(S::cancel))) st->cancel = true;
     }
     ImGui::SameLine();
@@ -721,8 +972,28 @@ void add_popup(App& a) {
             if (st->job.valid()) st->job.wait();
         }
         a.add.reset();
+        a.pending_check = false;
         ImGui::CloseCurrentPopup();
     }
+    ImGui::EndPopup();
+}
+
+// Asks before removing the extraction folder of the last PKG import (only that folder: remove_work_dir checks its marker and parent).
+void delete_popup(App& a) {
+    if (a.show_delete) ImGui::OpenPopup(T(S::pkg_delete)), a.show_delete = false;
+    if (!ImGui::BeginPopupModal(T(S::pkg_delete), nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) return;
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34);
+    ImGui::TextWrapped("%s", T(S::pkg_delete_confirm));
+    ImGui::TextWrapped("%s", a.delete_target.string().c_str());
+    ImGui::PopTextWrapPos();
+    if (ImGui::Button(T(S::yes))) {
+        std::string err;
+        a.pkg_msg.clear();
+        if (!remove_work_dir(a.delete_target, a.data_dir, err)) a.pkg_msg = err;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T(S::no))) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
 
@@ -776,15 +1047,16 @@ void frame(App& a, int tab_override) {
         ImGui::EndDisabled();
     }
     add_popup(a);
+    delete_popup(a);
     ImGui::End();
 }
 
 // ---- command line --------------------------------------------------------------------------------------------------------------------
 struct Cli {
-    bool dry_run = false, run = false, validate = false, auto_install = false;
+    bool dry_run = false, run = false, validate = false, auto_install = false, auto_extract = false, open_add = false, show_delete = false;
     double auto_play = 0;  // --auto-play <secs>: press Play, stop after secs (tests)
     double secs = 60;
-    std::string shot, game, add, add_dlc, config_dir, manifest, validate_dir;
+    std::string shot, game, add, add_dlc, add_update, add_pkg, add_dlc_pkg, add_update_pkg, extractor, config_dir, manifest, validate_dir;
     int tab = -1, w = 1100, h = 700;
     std::vector<fs::path> builds;
 };
@@ -806,6 +1078,14 @@ Cli parse_cli(int argc, char** argv) {
         else if (a == "--game") c.game = next();
         else if (a == "--add") c.add = next();
         else if (a == "--add-dlc") c.add_dlc = next();
+        else if (a == "--add-update") c.add_update = next();
+        else if (a == "--add-pkg") c.add_pkg = next();
+        else if (a == "--add-dlc-pkg") c.add_dlc_pkg = next();
+        else if (a == "--add-update-pkg") c.add_update_pkg = next();
+        else if (a == "--extractor") c.extractor = next();
+        else if (a == "--auto-extract") c.auto_extract = true;
+        else if (a == "--open-add") c.open_add = true;
+        else if (a == "--show-delete") c.show_delete = true;
         else if (a == "--auto-install") c.auto_install = true;
         else if (a == "--auto-play") c.auto_play = std::atof(next().c_str());
         else if (a == "--config-dir") c.config_dir = next();
@@ -831,7 +1111,7 @@ void print_progress(size_t done, size_t total, const std::string& path) {
 int run_cli(App& a, const Cli& cli) {
     attach_console();
     if (cli.validate) {
-        bb::dump::Source src{cli.validate_dir, std::nullopt, std::nullopt};
+        bb::dump::Source src{cli.validate_dir, std::nullopt, std::nullopt, std::nullopt};
         bb::dump::Report pre;
         bb::dump::check_structure(src.dump, pre);
         if (!cli.manifest.empty()) src.manifest = fs::path(cli.manifest);
@@ -896,6 +1176,14 @@ int main(int argc, char** argv) {
     if (cli.dry_run || cli.run || cli.validate) return run_cli(app, cli);
     app.extra_build_dirs = cli.builds;
     app.auto_install = cli.auto_install;
+    app.load_pkg_fields();
+    app.auto_extract = cli.auto_extract;
+    if (cli.show_delete)
+        if (const auto w = list_work_dirs(app.data_dir); !w.empty()) app.delete_target = w.front(), app.show_delete = true;
+    for (const auto& [slot, v] : {std::pair<int, const std::string&>{0, cli.add_pkg}, {1, cli.add_dlc_pkg}, {2, cli.add_update_pkg}})
+        if (!v.empty()) std::snprintf(app.pkg[slot].path, sizeof app.pkg[0].path, "%s", v.c_str());
+    if (!cli.extractor.empty()) std::snprintf(app.extractor, sizeof app.extractor, "%s", cli.extractor.c_str());
+    if (cli.open_add || !cli.add_pkg.empty()) app.open_add = true;
     if (!cli.game.empty()) app.cfg.selected = cli.game;
     if (app.cfg.selected.empty() && !app.cfg.games.empty()) app.cfg.selected = app.cfg.games.front().id;
 
@@ -934,6 +1222,7 @@ int main(int argc, char** argv) {
     if (!cli.add.empty()) {
         std::snprintf(app.add_path, sizeof app.add_path, "%s", cli.add.c_str());
         std::snprintf(app.add_dlc, sizeof app.add_dlc, "%s", cli.add_dlc.c_str());
+        std::snprintf(app.add_update, sizeof app.add_update, "%s", cli.add_update.c_str());
         app.start_check();
     }
 
@@ -968,7 +1257,7 @@ int main(int argc, char** argv) {
         ++frames;
         // Screenshot once everything has settled for a few frames (the read-back can lag one presented frame behind).
         if (!cli.shot.empty() && frames >= 8) {
-            const bool settled = !app.busy() && (!app.add || !app.add->job.valid()) && !app.proc.valid && (cli.auto_play <= 0 || play_at >= 0);
+            const bool settled = !app.busy() && (!app.add || !app.add->job.valid()) && !(app.pkgjob && app.pkgjob->job.valid() && !app.pkgjob->handled) && !app.auto_extract && !app.proc.valid && (cli.auto_play <= 0 || play_at >= 0);
             settled_frames = settled ? settled_frames + 1 : 0;
             if (settled_frames >= 4 || frames > 3000) {
                 SDL_Surface* s = SDL_RenderReadPixels(renderer, nullptr);

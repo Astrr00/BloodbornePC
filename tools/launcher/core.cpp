@@ -108,6 +108,10 @@ Config parse_config(std::string_view text) {
             if (key == "version") c.version = std::atoi(val.c_str());
             else if (key == "selected") c.selected = val;
             else if (key == "build_dir") c.build_dirs.push_back(val);
+            else if (key == "pkg_extractor") c.pkg_extractor = val;
+            else if (key == "pkg_game") c.pkg_game = val;
+            else if (key == "pkg_dlc") c.pkg_dlc = val;
+            else if (key == "pkg_update") c.pkg_update = val;
         } else if (key == "id") g->id = val;
         else if (key == "name") g->name = val;
         else if (key == "path") g->path = val;
@@ -129,6 +133,8 @@ std::string write_config(const Config& c) {
     o << "# BloodbornePC launcher state. Edited by the launcher; unknown keys are ignored.\n";
     o << "version=" << kConfigVersion << "\nselected=" << c.selected << "\n";
     for (const std::string& d : c.build_dirs) o << "build_dir=" << d << "\n";
+    for (const auto& [k, v] : {std::pair<const char*, const std::string&>{"pkg_extractor", c.pkg_extractor}, {"pkg_game", c.pkg_game}, {"pkg_dlc", c.pkg_dlc}, {"pkg_update", c.pkg_update}})
+        if (!v.empty()) o << k << "=" << v << "\n";
     for (const Game& g : c.games) {
         o << "\n[game]\nid=" << g.id << "\nname=" << g.name << "\npath=" << g.path << "\ntitle_id=" << g.title_id << "\napp_ver=" << g.app_ver
           << "\neboot_sha=" << g.eboot_sha << "\neboot_size=" << g.eboot_size << "\neboot_mtime=" << g.eboot_mtime << "\n";
@@ -299,6 +305,42 @@ bool write_plan_files(const Plan& p, std::string& err) {
     return true;
 }
 
+fs::path resolve_program_in(const std::string& name, const std::vector<fs::path>& dirs, std::string& err) {
+    if (name.empty()) {
+        err = "no program given";
+        return {};
+    }
+    std::error_code ec;
+    if (name.find_first_of("/\\") != std::string::npos) return fs::absolute(name, ec);  // the user gave a path: take it, CreateProcess reports problems
+    std::vector<std::string> names{name};
+#ifdef _WIN32
+    if (!fs::path(name).has_extension()) names.push_back(name + ".exe");
+#endif
+    for (const fs::path& d : dirs) {
+        if (d.empty() || !d.is_absolute()) continue;  // an empty or relative entry means "the current directory": skipped on purpose
+        for (const std::string& n : names) {
+            const fs::path c = d / n;
+            if (fs::exists(c, ec) && !fs::is_directory(c, ec)) return c;  // exists(): app-execution aliases (Store python) are reparse points
+        }
+    }
+    err = "program '" + name + "' not found next to the launcher or on PATH";
+    return {};
+}
+
+fs::path resolve_program(const std::string& name, std::string& err) {
+    std::vector<fs::path> dirs{bb::exe_dir()};
+    if (const char* path = std::getenv("PATH")) {
+#ifdef _WIN32
+        const char sep = ';';
+#else
+        const char sep = ':';
+#endif
+        std::istringstream in(path);
+        for (std::string d; std::getline(in, d, sep);) dirs.emplace_back(d);
+    }
+    return resolve_program_in(name, dirs, err);
+}
+
 bool valid_executable(const fs::path& exe, std::string& err) {
     err = exe.string() + " is not a valid 64-bit program";
     std::ifstream f(exe, std::ios::binary);
@@ -324,7 +366,7 @@ bool valid_executable(const fs::path& exe, std::string& err) {
 #ifdef _WIN32
 
 bool spawn(const Plan& p, Proc& proc, std::string& err) {
-    if (!valid_executable(p.exe, err)) return false;
+    if (!p.skip_exe_check && !valid_executable(p.exe, err)) return false;
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);  // never a system dialog for a bad image (the game gets the default mode back below)
     if (!p.config_file.empty()) SetEnvironmentVariableW(L"BB_CONFIG", p.config_file.c_str());
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
@@ -335,15 +377,28 @@ bool spawn(const Plan& p, Proc& proc, std::string& err) {
         if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
         return false;
     }
-    auto quote = [](const std::wstring& a) { return L"\"" + a + L"\""; };
+    // CommandLineToArgvW rules: quote every argument, double the backslashes before a quote and at the end, escape embedded quotes.
+    auto quote = [](const std::wstring& a) {
+        std::wstring o = L"\"";
+        for (size_t i = 0, bs = 0; i <= a.size(); ++i) {
+            if (i < a.size() && a[i] == L'\\') { ++bs; continue; }
+            if (i == a.size() || a[i] == L'"') o.append(bs * 2 + (i < a.size() ? 1 : 0), L'\\');
+            else o.append(bs, L'\\');
+            bs = 0;
+            if (i < a.size()) o += a[i];
+        }
+        return o + L"\"";
+    };
     std::wstring cmd = quote(p.exe.wstring());
-    for (const std::string& a : p.args) cmd += L" " + quote(fs::path(a).wstring());  // ponytail: no embedded quotes in paths/args
+    for (const std::string& a : p.args) cmd += L" " + quote(fs::path(a).wstring());
     STARTUPINFOW si{};
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = nul, si.hStdOutput = log, si.hStdError = log;
     PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE, nullptr, p.cwd.empty() ? nullptr : p.cwd.c_str(), &si, &pi);
+    const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE | (p.kill_tree ? CREATE_SUSPENDED : 0), nullptr,
+                                   p.cwd.empty() ? nullptr : p.cwd.c_str(), &si, &pi);
     const DWORD last = GetLastError();
     CloseHandle(log);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
@@ -351,8 +406,17 @@ bool spawn(const Plan& p, Proc& proc, std::string& err) {
         err = "cannot start " + p.exe.string() + " (error " + std::to_string(last) + ")";
         return false;
     }
+    HANDLE job = nullptr;
+    if (p.kill_tree) {  // the child (suspended until now) joins a job that dies with terminate() or with this process
+        job = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
+        lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (job) SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof lim);
+        if (job) AssignProcessToJobObject(job, pi.hProcess);
+        ResumeThread(pi.hThread);
+    }
     CloseHandle(pi.hThread);
-    proc = {reinterpret_cast<intptr_t>(pi.hProcess), true};
+    proc = {reinterpret_cast<intptr_t>(pi.hProcess), true, reinterpret_cast<intptr_t>(job)};
     return true;
 }
 
@@ -363,6 +427,7 @@ bool poll(Proc& proc, int& exit_code) {
     if (WaitForSingleObject(h, 0) != WAIT_OBJECT_0) return false;
     GetExitCodeProcess(h, &code);
     CloseHandle(h);
+    if (proc.job) CloseHandle(reinterpret_cast<HANDLE>(proc.job)), proc.job = 0;  // kill-on-close: stray grandchildren end with the job
     proc.valid = false;
     exit_code = int(code);
     return true;
@@ -371,16 +436,18 @@ bool poll(Proc& proc, int& exit_code) {
 void terminate(Proc& proc) {
     if (!proc.valid) return;
     HANDLE h = reinterpret_cast<HANDLE>(proc.handle);
+    if (proc.job) TerminateJobObject(reinterpret_cast<HANDLE>(proc.job), 1);
     TerminateProcess(h, 1);
     WaitForSingleObject(h, 5000);
     CloseHandle(h);
+    if (proc.job) CloseHandle(reinterpret_cast<HANDLE>(proc.job)), proc.job = 0;
     proc.valid = false;
 }
 
 #else
 
 bool spawn(const Plan& p, Proc& proc, std::string& err) {
-    if (!valid_executable(p.exe, err)) return false;
+    if (!p.skip_exe_check && !valid_executable(p.exe, err)) return false;
     if (!p.config_file.empty()) setenv("BB_CONFIG", p.config_file.c_str(), 1);
     std::vector<std::string> argv_s{p.exe.string()};
     argv_s.insert(argv_s.end(), p.args.begin(), p.args.end());
@@ -394,6 +461,7 @@ bool spawn(const Plan& p, Proc& proc, std::string& err) {
     }
     const pid_t pid = fork();
     if (pid == 0) {
+        if (p.kill_tree) setpgid(0, 0);
         if (!p.cwd.empty() && chdir(p.cwd.c_str()) != 0) _exit(127);
         dup2(log, 1), dup2(log, 2);
         close(log);
@@ -421,6 +489,7 @@ bool poll(Proc& proc, int& exit_code) {
 void terminate(Proc& proc) {
     if (!proc.valid) return;
     kill(pid_t(proc.handle), SIGKILL);
+    kill(-pid_t(proc.handle), SIGKILL);  // the process group of a kill_tree child (harmless ESRCH otherwise)
     waitpid(pid_t(proc.handle), nullptr, 0);
     proc.valid = false;
 }

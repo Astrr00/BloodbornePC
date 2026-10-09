@@ -34,8 +34,28 @@
     X(browse, "Browse...")                                                                                                                   \
     X(check, "Check")                                                                                                                        \
     X(checking, "Checking the dump...")                                                                                                      \
+    X(pkg_section, "From PKG files")                                                                                                          \
+    X(pkg_note, "The launcher does not decrypt PKG files and contains no keys: it runs an external extractor that you trust and configure once.")  \
+    X(pkg_game, "Game PKG (.pkg)")                                                                                                            \
+    X(pkg_dlc, "DLC PKG (optional)")                                                                                                          \
+    X(pkg_update, "Update PKG (optional)")                                                                                                    \
+    X(pkg_extractor, "PKG extractor (external tool, configured once)")                                                                        \
+    X(pkg_extractor_hint, "The launcher does not decrypt PKGs itself. Enter the command of an extractor you trust, e.g. python C:\\path\\tool.py {pkg} {out}; it must write Image0/ and Sc0/ below {out}.") \
+    X(pkg_extract, "Extract and check")                                                                                                       \
+    X(pkg_space_note, "Extraction needs the unpacked size once and Install the same again (a game with its update: about 30 GiB + 30 GiB).")  \
+    X(pkg_need_game, "Choose the game PKG first.")                                                                                            \
+    X(pkg_done, "Extracted. The folders below were filled in; check them and press Install.")                                                \
+    X(pkg_work_note, "Extracted PKG files (a temporary copy; installed games do not need it): ")                                              \
+    X(pkg_delete, "Delete extracted files")                                                                                                   \
+    X(pkg_delete_confirm, "Delete the extracted files of this PKG import? Your PKG files and installed games are not touched.")           \
+    X(yes, "Yes")                                                                                                                              \
+    X(no, "No")                                                                                                                                \
+    X(folders_section, "Or use folders that are already extracted")                                                                           \
+    X(use_in_place_pkg, "The extracted files are temporary: use Install.")                                                                    \
     X(dlc_folder, "DLC folder (optional)")                                                                                                   \
     X(dlc_hint, "Add-on (The Old Hunters): the folder with its param.sfo.")                                                                  \
+    X(update_folder, "Update 1.09 folder (optional)")                                                                                        \
+    X(update_hint, "Base 01.00 + the extracted 1.09 update package (folder with its Sc0 and Image0): merged by Install; nothing is decrypted.")  \
     X(add_hint, "Choose the folder that holds eboot.bin and sce_sys, or the one with Image0 and Sc0 (decrypted dump of your own copy).")     \
     X(version_recognised, "Recognised: ")                                                                                                    \
     X(manifest_used, "Hash manifest: ")                                                                                                      \
@@ -46,6 +66,7 @@
     X(use_in_place, "Use in place")                                                                                                          \
     X(use_in_place_unverified, "Use in place (unverified)")                                                                                  \
     X(use_in_place_hint, "Keeps the folder where it is; nothing is copied.")                                                                 \
+    X(use_in_place_update, "An update has to be merged: use Install.")                                                                      \
     X(installing, "Installing...")                                                                                                           \
     X(cancel, "Cancel")                                                                                                                      \
     X(close, "Close")                                                                                                                        \

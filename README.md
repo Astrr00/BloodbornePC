@@ -128,6 +128,16 @@ and keeps its output in `game.log`; on a failed run the last lines are shown.
   (and in folders added on the Games tab) and matches the SHA-256 of the dump's `eboot.bin` with the one the build recorded: the file
   `<exe>.eboot.sha256` that the CMake build writes next to `bbgame`, a line `bbgame.exe=<sha256>` in a `games.ini` in that folder, or the output of
   `bbgame --eboot-hash`. Without a match it says so and shows the build steps above.
+- **PKG files:** the Add dialog can take the game PKG, an optional DLC PKG and an optional update PKG. **The launcher does not decrypt anything and ships no keys**: it
+  reads only the plain PKG header (content id, title id; a non-PKG file or a PKG for another title is rejected) and runs an *external extractor* that you trust and
+  configure once, as a command template such as `python C:\path\tool.py {pkg} {out}` (split into arguments without a shell; `{pkg}` and `{out}` are passed as single
+  arguments; the tool must write `Image0/` and `Sc0/` below `{out}`). Each PKG is unpacked into a fresh folder `pkg_work\<run>` of the launcher's data folder, the output is
+  logged there, and the folders then go through the normal check and Install. Extraction needs the unpacked size once and Install the same again (a game with its update: about
+  30 GiB + 30 GiB). Nothing is deleted automatically except the partial output of a failed or cancelled extraction (its extractor log stays in `pkg_work`, and the error shows its path). Every leftover work folder, also from an earlier launcher run, is listed on the Games tab; **Delete extracted files** (with confirmation) removes that one folder and its logs.
+- **Update 1.09:** a 1.00 base needs the separate 1.09 update package. Give the launcher (or `bbinstall ... --update <dir>`) the base and the extracted update
+  folder (decrypted, `Image0/` + `Sc0/` like a dump; extracting the PKG is not part of this project). Validation checks the update's title id and version and the
+  hash manifest against the virtual merge without copying; **Install** then copies the base, overlays the update and verifies the result, so the merged copy reads as 01.09.
+  It needs the disk space of a full copy; "Use in place" is not offered with an update.
 - Settings are written per game to `bbconfig.ini` (`KEY=VALUE` with the variable names of the runtime options below, `#` comments) in
   `profiles\<game>\` and handed to `bbgame` via `BB_CONFIG`. `bbgame` itself reads `bbconfig.ini` next to its executable, else
   `%APPDATA%\BloodbornePC\bbconfig.ini` (Linux: `$XDG_CONFIG_HOME/BloodbornePC`); real environment variables always win. `BB_FULLSCREEN=1` starts fullscreen.
@@ -141,9 +151,9 @@ and keeps its output in `game.log`; on a failed run the last lines are shown.
 ## Tools
 
 ```
-bbinstall validate <dump> [--dlc <dlc>] [--manifest <file.sha256>]   # check a dump
+bbinstall validate <dump> [--dlc <dlc>] [--update <update>] [--manifest <file.sha256>]   # check a dump (--update: 1.00 base + 1.09 update folder, merged virtually)
 bbinstall hash     <dump> -o <file.sha256>                             # create a manifest
-bbinstall install  <dump> [--dlc <dlc>] [--manifest ...] [--dest <dir>]
+bbinstall install  <dump> [--dlc <dlc>] [--update <update>] [--manifest ...] [--dest <dir>]
 bbelf <eboot.bin> [--names symbols.txt] [--csv imports.csv] [--relocs] [--functions functions.csv] [--jumptables jt.csv]
 bbrecomp <eboot.bin> --stats | --coverage | --emit <out.cpp> | --emit-leaves <out.cpp> <max> | --emit-dir <dir> <n>  [--bias <hex>] [--names <txt>]
 bbdiff <eboot.bin> [inputs]   # local only: cmake -DBB_EBOOT=<eboot.bin>; compares recompiled with native execution

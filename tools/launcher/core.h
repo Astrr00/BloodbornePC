@@ -34,6 +34,8 @@ struct Config {
     std::string selected;  // Game::id
     std::vector<Game> games;
     std::vector<std::string> build_dirs;  // extra folders searched for bbgame builds (besides the launcher's own)
+    // PKG import (external extractor, never decrypted by the launcher): command template, the last chosen PKG files, and the work folder of the last import
+    std::string pkg_extractor, pkg_game, pkg_dlc, pkg_update;
     bool operator==(const Config&) const = default;
 };
 
@@ -73,6 +75,8 @@ struct Plan {
     fs::path exe, eboot, cwd, config_file, log_file;
     std::vector<std::string> args;  // after the exe
     std::string config_text;
+    bool skip_exe_check = false;  // third-party tool (PKG extractor): no PE/x64 gate, CreateProcess reports what is wrong
+    bool kill_tree = false;  // terminate() also ends the child's own children (Windows job object / Linux process group)
 };
 Plan make_plan(const Game& g, const Build& b, const fs::path& config_dir);
 // Human readable command line, environment and bbconfig.ini (--dry-run).
@@ -87,7 +91,13 @@ bool valid_executable(const fs::path& exe, std::string& err);
 struct Proc {
     intptr_t handle = 0;  // HANDLE (Windows) or pid
     bool valid = false;
+    intptr_t job = 0;  // Windows job object of a kill_tree process
 };
+// Finds a program for the extractor: a name with a folder part is taken as given (made absolute); a bare name is looked for in `dirs` in order
+// (".exe" appended on Windows when it has no extension). The current directory is never searched.
+fs::path resolve_program_in(const std::string& name, const std::vector<fs::path>& dirs, std::string& err);
+// Same with the launcher's own folder first, then the absolute entries of PATH.
+fs::path resolve_program(const std::string& name, std::string& err);
 // Starts the game (stdout+stderr -> plan.log_file, BB_CONFIG=plan.config_file, cwd = plan.cwd).
 bool spawn(const Plan& p, Proc& proc, std::string& err);
 bool poll(Proc& proc, int& exit_code);  // true once the process ended (then proc.valid == false)

@@ -128,7 +128,7 @@ else()
     set_property(TARGET bbimgui PROPERTY COMPILE_OPTIONS -w)
 endif()
 
-add_library(bblaunchercore STATIC tools/launcher/core.cpp)
+add_library(bblaunchercore STATIC tools/launcher/core.cpp tools/launcher/pkg.cpp)
 target_include_directories(bblaunchercore PUBLIC tools/launcher)
 target_link_libraries(bblaunchercore PUBLIC bbimage)
 add_executable(bblauncher WIN32 tools/launcher/main.cpp)
