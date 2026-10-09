@@ -590,7 +590,7 @@ def main(out):
     write(os.path.join(ub, "Image0", "dvdroot_ps4", "a.bin"), b"base a")
     write(os.path.join(ub, "Image0", "dvdroot_ps4", "b.bin"), b"base b")
     write(os.path.join(ub, "Sc0", "param.sfo"), sfo("01.00", "gd"))
-    for name, ver, tid in (("upd", "01.09", "CUSA00207"), ("upd_wrong_title", "01.09", "CUSA99999"), ("upd_old", "01.05", "CUSA00207")):
+    for name, ver, tid in (("upd", "01.09", "CUSA00207"), ("upd_wrong_title", "01.09", "CUSA99999"), ("upd_other_release", "01.09", "CUSA00900"), ("upd_old", "01.05", "CUSA00207")):
         u = os.path.join(out, name)
         write(os.path.join(u, "Image0", "dvdroot_ps4", "b.bin"), b"update b")
         write(os.path.join(u, "Image0", "dvdroot_ps4", "d.bin"), b"update d")

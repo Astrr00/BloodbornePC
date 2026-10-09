@@ -110,6 +110,8 @@ code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd"), "-
 check("missing merged file reported", code == 1 and "missing: Image0/dvdroot_ps4/zzz.bin" in out, out)
 code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_wrong_title"))
 check("update for another title rejected", code == 1 and "not for this game (title CUSA99999 vs CUSA00207)" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_other_release"))
+check("update of another known Bloodborne release gets a hint", code == 1 and "belongs to another Bloodborne release" in out, out)
 code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_old"))
 check("update with another version rejected", code == 1 and "Update is version 01.05, expected 01.09" in out, out)
 code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_empty"))
