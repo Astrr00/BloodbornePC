@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "core/install.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 
@@ -44,6 +45,22 @@ bool copy_tree(const fs::path& from, const fs::path& to, const Progress& progres
     return true;
 }
 
+bool under(const fs::path& rel) { return !rel.empty() && *rel.begin() != ".." && !rel.is_absolute(); }
+
+// Where a manifest entry (path relative to the base root) lives once `update` is merged onto the base: the update's copy if it has one.
+fs::path merged_path(const fs::path& dump, const fs::path& update, const ManifestEntry& e) {
+    const Layout b = resolve_layout(dump), u = resolve_layout(update);
+    const fs::path p = (dump / fs::path(e.path)).lexically_normal();
+    std::error_code ec;
+    const fs::path sys = p.lexically_relative(b.sce_sys.lexically_normal());  // system files first: console layout has sce_sys inside the app folder
+    if (under(sys)) {
+        if (fs::is_regular_file(u.sce_sys / sys, ec)) return u.sce_sys / sys;
+    } else if (const fs::path app = p.lexically_relative(b.app.lexically_normal()); under(app) && fs::is_regular_file(u.app / app, ec)) {
+        return u.app / app;
+    }
+    return dump / fs::path(e.path);
+}
+
 // Manifest paths are relative to the dump root; the install normalizes the layout (copy_layout below), so map each entry
 // to where its file was copied. Entries of files that are not installed (license/np data in Sc0/) are dropped.
 std::vector<ManifestEntry> map_to_install(const std::vector<ManifestEntry>& manifest, const fs::path& root, const fs::path& to) {
@@ -63,13 +80,16 @@ std::vector<ManifestEntry> map_to_install(const std::vector<ManifestEntry>& mani
 }
 
 // Normalize to the console layout: app files at to/, system files at to/sce_sys/. From a PKG-extractor Sc0/ only what the
-// port uses is taken (license/np binding data is not needed and not staged).
-bool copy_layout(const fs::path& src, const fs::path& to, const Progress& progress, const Log& log, const std::atomic<bool>* cancel) {
+// port uses is taken (license/np binding data is not needed and not staged), unless `full_sys`: an update merged onto a
+// console-layout base replaces any sce_sys file the base's manifest lists, so its whole Sc0/ is staged.
+bool copy_layout(const fs::path& src, const fs::path& to, const Progress& progress, const Log& log, const std::atomic<bool>* cancel,
+                 bool full_sys = false) {
     Layout l = resolve_layout(src);
     std::error_code ec;
     if (fs::is_directory(l.app, ec) && !copy_tree(l.app, to, progress, log, cancel)) return false;  // entitlement-only DLC: no app files
     if (l.sce_sys == l.app / "sce_sys") return true;
     fs::create_directories(to / "sce_sys", ec);
+    if (full_sys) return !fs::is_directory(l.sce_sys, ec) || copy_tree(l.sce_sys, to / "sce_sys", progress, log, cancel);
     for (const char* f : {"param.sfo", "icon0.png"})
         if (fs::exists(l.sce_sys / f, ec) && !fs::copy_file(l.sce_sys / f, to / "sce_sys" / f, fs::copy_options::overwrite_existing, ec)) {
             log(Severity::Error, "Copying " + (l.sce_sys / f).string() + " failed: " + ec.message());
@@ -80,9 +100,26 @@ bool copy_layout(const fs::path& src, const fs::path& to, const Progress& progre
 
 } // namespace
 
+MergeStats merge_stats(const fs::path& dump, const fs::path& update) {
+    MergeStats m;
+    const fs::path base = resolve_layout(dump).app, upd = resolve_layout(update).app;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec)) ++m.base_only, m.bytes += it->file_size(ec);
+    for (fs::recursive_directory_iterator it(upd, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        ++m.from_update;
+        m.bytes += it->file_size(ec);
+        const fs::path old = base / fs::relative(it->path(), upd, ec);
+        if (fs::is_regular_file(old, ec)) ++m.overridden, --m.base_only, m.bytes -= fs::file_size(old, ec);
+    }
+    return m;
+}
+
 Report validate(const Source& s, const Progress& progress) {
     Report r;
-    check_structure(s.dump, r);
+    check_structure(s.dump, r, s.update.has_value());
+    if (s.update) check_update(*s.update, r.title_id, r);
     if (s.dlc) check_dlc(*s.dlc, r.title_id, r);
     else r.add(Severity::Warning, "No DLC folder given: the add-on entitlement (The Old Hunters, SPEXPANSIONDLC03) will not be "
                                   "reported, so the game will not offer the expansion.");
@@ -90,6 +127,8 @@ Report validate(const Source& s, const Progress& progress) {
         std::string err;
         auto m = load_manifest(*s.manifest, err);
         if (!err.empty()) r.add(Severity::Error, err);
+        else if (r.ok() && s.update)
+            check_manifest(m, [&](const ManifestEntry& e) { return merged_path(s.dump, *s.update, e); }, r, progress);
         else if (r.ok()) check_manifest(s.dump, m, r, progress);
     } else {
         r.add(Severity::Warning, "No hash manifest given: file contents not verified.");
@@ -98,6 +137,10 @@ Report validate(const Source& s, const Progress& progress) {
 }
 
 uintmax_t install_bytes(const Source& s) {
+    // Peak disk use of a merge: the base copy (files are overwritten while the update is laid over it), the merged set, plus the update itself to be safe.
+    if (s.update)
+        return std::max(tree_bytes(resolve_layout(s.dump).app), merge_stats(s.dump, *s.update).bytes) + tree_bytes(resolve_layout(*s.update).app) +
+               (s.dlc ? tree_bytes(resolve_layout(*s.dlc).app) : 0);
     return tree_bytes(resolve_layout(s.dump).app) + (s.dlc ? tree_bytes(resolve_layout(*s.dlc).app) : 0);
 }
 
@@ -135,6 +178,13 @@ bool install(const Source& src, const fs::path& dest, const Progress& progress, 
     }
     log(Severity::Info, "Installing to " + dest.string() + " ...");
     if (!copy_layout(src.dump, dest / "game", progress, log, cancel)) return false;
+    if (src.update) {  // overlay: the update's files (incl. the 01.09 param.sfo) replace the base's at identical paths
+        const MergeStats m = merge_stats(src.dump, *src.update);
+        log(Severity::Info, "Merging update: " + std::to_string(m.base_only) + " files from the base, " + std::to_string(m.from_update) + " from the update (" +
+                                std::to_string(m.overridden) + " replace base files).");
+        const Layout bl = resolve_layout(src.dump);
+        if (!copy_layout(*src.update, dest / "game", progress, log, cancel, bl.sce_sys == bl.app / "sce_sys")) return false;
+    }
     if (src.dlc && !copy_layout(*src.dlc, dest / "dlc", progress, log, cancel)) return false;
     if (src.manifest) {  // the source was verified above; verify the installed copy too (disk/copy errors)
         std::string err;

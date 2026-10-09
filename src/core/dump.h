@@ -52,11 +52,17 @@ struct Layout {
 Layout resolve_layout(const fs::path& root);
 
 // Structural checks: param.sfo (title id, category, version), eboot.bin format, data dir.
-void check_structure(const fs::path& game, Report& report);
+// `base_for_update`: the folder is the 01.00 base an update will be merged onto (01.00 expected; 01.09 only warns that no update is needed).
+void check_structure(const fs::path& game, Report& report, bool base_for_update = false);
+// The update (patch) folder for `game_title_id`: same layouts as a dump; param.sfo must carry the same title id and APP_VER kRequiredAppVer.
+void check_update(const fs::path& update, const std::string& game_title_id, Report& report);
 void check_dlc(const fs::path& dlc, const std::string& game_title_id, Report& report);
 // Every manifest entry must exist below root with a matching hash; extra files are allowed.
 void check_manifest(const fs::path& root, const std::vector<ManifestEntry>& manifest, Report& report,
                     const Progress& progress);
+// Same, but each entry's file is found by `resolve` (e.g. a virtual base + update merge); nothing is copied.
+using Resolver = std::function<fs::path(const ManifestEntry&)>;
+void check_manifest(const std::vector<ManifestEntry>& manifest, const Resolver& resolve, Report& report, const Progress& progress);
 
 // %APPDATA%/BloodbornePC on Windows, $XDG_DATA_HOME/BloodbornePC (default ~/.local/share) elsewhere.
 fs::path default_install_dir();

@@ -13,12 +13,13 @@ using namespace bb::dump;
 namespace {
 
 constexpr const char* kUsage = R"(usage:
-  bbinstall validate <dump-dir> [--manifest <file.sha256>] [--dlc <dlc-dir>]
+  bbinstall validate <dump-dir> [--manifest <file.sha256>] [--dlc <dlc-dir>] [--update <update-dir>]
   bbinstall hash     <dir> -o <file.sha256>
-  bbinstall install  <dump-dir> [--manifest <file.sha256>] [--dlc <dlc-dir>] [--dest <dir>]
+  bbinstall install  <dump-dir> [--manifest <file.sha256>] [--dlc <dlc-dir>] [--update <update-dir>] [--dest <dir>]
 
 <dump-dir> is the decrypted, extracted application folder (eboot.bin, sce_sys/, dvdroot_ps4/)
-with update 1.09 merged in. Manifests use `sha256sum` format; see manifests/README.md.
+with update 1.09 merged in, or the 01.00 base together with --update <update-dir> (the extracted 1.09 update package;
+it is merged onto the base: validated virtually, then installed as one tree). Manifests use `sha256sum` format; see manifests/README.md.
 Exit codes: 0 ok, 1 validation failed, 2 usage error.
 )";
 
@@ -39,18 +40,19 @@ bool print_report(const Report& r) {
 struct Args {
     std::string command;
     fs::path input;
-    std::optional<fs::path> manifest, dlc, dest, out;
+    std::optional<fs::path> manifest, dlc, dest, out, update;
 };
 
 std::optional<Args> parse_args(int argc, char** argv) {
     if (argc < 3) return std::nullopt;
-    Args a{argv[1], fs::path(argv[2]), {}, {}, {}, {}};
+    Args a{argv[1], fs::path(argv[2]), {}, {}, {}, {}, {}};
     for (int i = 3; i < argc; ++i) {
         std::string k = argv[i];
         if (i + 1 >= argc) return std::nullopt;
         fs::path v = argv[++i];
         if (k == "--manifest") a.manifest = v;
         else if (k == "--dlc") a.dlc = v;
+        else if (k == "--update") a.update = v;
         else if (k == "--dest") a.dest = v;
         else if (k == "-o") a.out = v;
         else return std::nullopt;
@@ -58,7 +60,7 @@ std::optional<Args> parse_args(int argc, char** argv) {
     return a;
 }
 
-Source source(const Args& a) { return {a.input, a.manifest, a.dlc}; }
+Source source(const Args& a) { return {a.input, a.manifest, a.dlc, a.update}; }
 
 } // namespace
 
@@ -68,7 +70,16 @@ int main(int argc, char** argv) {
         std::fputs(kUsage, stderr);
         return 2;
     }
-    if (args->command == "validate") return print_report(validate(source(*args), print_progress)) ? 0 : 1;
+    if (args->command == "validate") {
+        const Report r = validate(source(*args), print_progress);
+        const bool ok = print_report(r);
+        if (args->update && ok) {
+            const MergeStats m = merge_stats(args->input, *args->update);
+            std::printf("Merged set: %zu files from the base, %zu from the update (%zu of them replace base files), %.1f GiB.\n", m.base_only, m.from_update,
+                        m.overridden, double(m.bytes) / (1u << 30));
+        }
+        return ok ? 0 : 1;
+    }
 
     if (args->command == "hash") {
         if (!args->out || !fs::is_directory(args->input)) {

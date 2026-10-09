@@ -122,7 +122,7 @@ Layout resolve_layout(const fs::path& root) {
     return {root, root / "sce_sys"};
 }
 
-void check_structure(const fs::path& game, Report& r) {
+void check_structure(const fs::path& game, Report& r, bool base_for_update) {
     if (fs::is_regular_file(game) && is_pkg_file(game)) {
         r.add(Severity::Error,
               "Input is a PKG file. PKG contents are PFS-encrypted and this project ships no keys and performs no "
@@ -159,7 +159,13 @@ void check_structure(const fs::path& game, Report& r) {
         else if (category == "gp")
             r.add(Severity::Info, "param.sfo is from the update (CATEGORY gp); base game files must be merged in.");
         r.add(Severity::Info, "param.sfo: " + r.title_id + " v" + r.app_ver + " (" + category + ")");
-        if (r.app_ver != kRequiredAppVer)
+        if (base_for_update && r.app_ver == "01.00")
+            r.add(Severity::Info, "base is version 01.00: the update will be merged onto it.");
+        else if (base_for_update && r.app_ver == kRequiredAppVer)
+            r.add(Severity::Warning, std::string("this folder is already version ") + kRequiredAppVer + ": the update is not needed (and would only overwrite files).");
+        else if (base_for_update)
+            r.add(Severity::Error, "Base version is " + (r.app_ver.empty() ? "unknown" : r.app_ver) + ", the update " + kRequiredAppVer + " is merged onto 01.00.");
+        else if (r.app_ver != kRequiredAppVer)
             r.add(Severity::Error, "Game version is " + (r.app_ver.empty() ? "unknown" : r.app_ver) +
                                        ", required " + kRequiredAppVer + ". Apply update 1.09 to the dump.");
     }
@@ -200,11 +206,42 @@ void check_dlc(const fs::path& dlc, const std::string& game_title_id, Report& r)
 
 void check_manifest(const fs::path& root, const std::vector<ManifestEntry>& manifest, Report& r,
                     const Progress& progress) {
+    check_manifest(manifest, [&](const ManifestEntry& e) { return root / fs::path(e.path); }, r, progress);
+}
+
+void check_update(const fs::path& update, const std::string& game_title_id, Report& r) {
+    std::error_code ec;
+    if (fs::is_regular_file(update, ec) && is_pkg_file(update)) {
+        r.add(Severity::Error, "Update is a PKG file. Extract the update package with an external tool first (this project performs no decryption), then pass the extracted folder.");
+        return;
+    }
+    if (!fs::is_directory(update, ec)) {
+        r.add(Severity::Error, "Update folder not found: " + update.string());
+        return;
+    }
+    auto sfo = load_sfo(resolve_layout(update).sce_sys / "param.sfo");
+    if (!sfo) {
+        r.add(Severity::Error, "Update folder has no param.sfo (expected Sc0/param.sfo or sce_sys/param.sfo) or is empty: " + update.string());
+        return;
+    }
+    const std::string tid = sfo->str("TITLE_ID").value_or(""), ver = sfo->str("APP_VER").value_or(""), cat = sfo->str("CATEGORY").value_or("");
+    if (!game_title_id.empty() && tid != game_title_id)
+        r.add(Severity::Error, "Update folder is not for this game (title " + tid + " vs " + game_title_id + ").");
+    if (ver != kRequiredAppVer)
+        r.add(Severity::Error, "Update is version " + (ver.empty() ? "unknown" : ver) + ", expected " + kRequiredAppVer + ".");
+    if (cat != "gp")
+        r.add(Severity::Warning, "Update CATEGORY is '" + cat + "' (an update package has 'gp').");
+    if (!fs::is_directory(resolve_layout(update).app, ec))
+        r.add(Severity::Error, "Update folder has no application files (Image0/ or dvdroot_ps4/).");
+    r.add(Severity::Info, "update: " + tid + " v" + ver + " (" + cat + ")");
+}
+
+void check_manifest(const std::vector<ManifestEntry>& manifest, const Resolver& resolve, Report& r, const Progress& progress) {
     std::vector<fs::path> files;
     std::vector<std::string> names;
     std::vector<const ManifestEntry*> present;
     for (auto& e : manifest) {
-        fs::path p = root / fs::path(e.path);
+        fs::path p = resolve(e);
         std::error_code ec;
         if (!fs::is_regular_file(p, ec)) {
             r.add(Severity::Error, "missing: " + e.path);

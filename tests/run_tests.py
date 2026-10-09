@@ -89,4 +89,52 @@ check("Sc0-only DLC accepted and staged", code == 0 and "TESTDLC000000000" in ou
 code, out = run("bbinstall", "validate", w("no_image0"))
 check("game without Image0 rejected", code == 1 and "Image0/ missing" in out, out)
 
+# update merge (base 01.00 + update 01.09 -> manifest of the merged tree; nothing is copied for validate)
+import hashlib
+sha = lambda b: hashlib.sha256(b).hexdigest()
+elf = open(w("eboot.elf"), "rb").read()
+sfo109 = open(w("upd", "Sc0", "param.sfo"), "rb").read()
+merged_entries = [(sha(elf), "Image0/eboot.bin"), (sha(b"base a"), "Image0/dvdroot_ps4/a.bin"), (sha(b"update b"), "Image0/dvdroot_ps4/b.bin"),
+                  (sha(b"update d"), "Image0/dvdroot_ps4/d.bin"), (sha(sfo109), "Sc0/param.sfo")]
+def manifest(name, entries):
+    with open(w(name), "w") as f:
+        f.writelines(f"{h}  {p}\n" for h, p in entries)
+manifest("merged.sha256", merged_entries)
+manifest("merged_missing.sha256", merged_entries + [(sha(b"x"), "Image0/dvdroot_ps4/zzz.bin")])
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd"), "--manifest", w("merged.sha256"))
+check("update merge validates against the merged manifest", code == 0 and "5/5 files verified" in out and "base is version 01.00" in out
+      and "Merged set: 2 files from the base, 2 from the update (1 of them replace base files)" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--manifest", w("merged.sha256"))
+check("01.00 base without the update is rejected", code == 1 and "required 01.09" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd"), "--manifest", w("merged_missing.sha256"))
+check("missing merged file reported", code == 1 and "missing: Image0/dvdroot_ps4/zzz.bin" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_wrong_title"))
+check("update for another title rejected", code == 1 and "not for this game (title CUSA99999 vs CUSA00207)" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_old"))
+check("update with another version rejected", code == 1 and "Update is version 01.05, expected 01.09" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("upd_empty"))
+check("update folder without param.sfo rejected", code == 1 and "no param.sfo" in out, out)
+code, out = run("bbinstall", "validate", w("upd_base"), "--update", w("does_not_exist"))
+check("missing update folder rejected", code == 1 and "Update folder not found" in out, out)
+code, out = run("bbinstall", "validate", w("extracted"), "--update", w("upd"))
+check("base already 01.09: warning only", code == 0 and "already version 01.09" in out, out)
+code, out = run("bbinstall", "install", w("upd_base"), "--update", w("upd"), "--manifest", w("merged.sha256"), "--dest", w("installed_upd"))
+g = lambda *p: os.path.join(w("installed_upd", "game"), *p)
+rd = lambda *p: open(g(*p), "rb").read()
+check("update install: override wins, base-only kept, update-only added, sfo is 01.09",
+      code == 0 and os.path.isfile(g("eboot.bin")) and rd("dvdroot_ps4", "a.bin") == b"base a" and rd("dvdroot_ps4", "b.bin") == b"update b"
+      and rd("dvdroot_ps4", "d.bin") == b"update d" and rd("sce_sys", "param.sfo") == sfo109
+      and not os.path.exists(w("installed_upd", ".bbinstall-incomplete")) and "Merging update" in out, out)
+# console-layout base + PKG-layout update: validate and install must agree (the update's Sc0/extra.dat replaces the base's sce_sys/extra.dat)
+manifest("merged_mixed.sha256", [(sha(elf), "eboot.bin"), (sha(b"update a"), "dvdroot_ps4/a.bin"), (sha(sfo109), "sce_sys/param.sfo"), (sha(b"update extra"), "sce_sys/extra.dat")])
+code, out = run("bbinstall", "validate", w("upd_cbase"), "--update", w("upd_pkglayout"), "--manifest", w("merged_mixed.sha256"))
+check("mixed layouts: validate against the merged manifest", code == 0 and "4/4 files verified" in out, out)
+code, out = run("bbinstall", "install", w("upd_cbase"), "--update", w("upd_pkglayout"), "--manifest", w("merged_mixed.sha256"), "--dest", w("installed_mixed"))
+check("mixed layouts: install agrees with validate (sce_sys replaced by the update's Sc0)", code == 0
+      and open(w("installed_mixed", "game", "sce_sys", "extra.dat"), "rb").read() == b"update extra"
+      and open(w("installed_mixed", "game", "dvdroot_ps4", "a.bin"), "rb").read() == b"update a"
+      and not os.path.exists(w("installed_mixed", ".bbinstall-incomplete")), out)
+code, out = run("bbinstall", "install", w("upd_base"), "--update", w("upd_wrong_title"), "--dest", w("installed_bad"))
+check("bad update installs nothing", code == 1 and not os.path.exists(w("installed_bad", "game")), out)
+
 sys.exit(1 if failures else 0)

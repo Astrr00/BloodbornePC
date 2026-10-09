@@ -582,6 +582,30 @@ def main(out):
     write(os.path.join(out, "dlc_sc0", "Sc0", "param.sfo"),
           build_sfo([("CATEGORY", "ac"), ("CONTENT_ID", "EP9000-CUSA00207_00-TESTDLC000000000"),
                      ("TITLE_ID", "CUSA00207")]))
+    # update merge: PKG-extractor base 01.00 (eboot, a.bin, b.bin) + update 01.09 (b.bin overrides, d.bin is new, param.sfo 01.09 gp)
+    def sfo(ver, cat, tid="CUSA00207"):
+        return build_sfo([("APP_VER", ver), ("CATEGORY", cat), ("TITLE_ID", tid)])
+    ub = os.path.join(out, "upd_base")
+    write(os.path.join(ub, "Image0", "eboot.bin"), elf)
+    write(os.path.join(ub, "Image0", "dvdroot_ps4", "a.bin"), b"base a")
+    write(os.path.join(ub, "Image0", "dvdroot_ps4", "b.bin"), b"base b")
+    write(os.path.join(ub, "Sc0", "param.sfo"), sfo("01.00", "gd"))
+    for name, ver, tid in (("upd", "01.09", "CUSA00207"), ("upd_wrong_title", "01.09", "CUSA99999"), ("upd_old", "01.05", "CUSA00207")):
+        u = os.path.join(out, name)
+        write(os.path.join(u, "Image0", "dvdroot_ps4", "b.bin"), b"update b")
+        write(os.path.join(u, "Image0", "dvdroot_ps4", "d.bin"), b"update d")
+        write(os.path.join(u, "Sc0", "param.sfo"), sfo(ver, "gp", tid))
+    # console-layout base + PKG-layout update (the layouts differ): the update's Sc0/ replaces sce_sys files of the base
+    cb = os.path.join(out, "upd_cbase")
+    write(os.path.join(cb, "eboot.bin"), elf)
+    write(os.path.join(cb, "sce_sys", "param.sfo"), sfo("01.00", "gd"))
+    write(os.path.join(cb, "sce_sys", "extra.dat"), b"base extra")
+    write(os.path.join(cb, "dvdroot_ps4", "a.bin"), b"base a")
+    cu = os.path.join(out, "upd_pkglayout")
+    write(os.path.join(cu, "Image0", "dvdroot_ps4", "a.bin"), b"update a")
+    write(os.path.join(cu, "Sc0", "param.sfo"), sfo("01.09", "gp"))
+    write(os.path.join(cu, "Sc0", "extra.dat"), b"update extra")
+    write(os.path.join(out, "upd_empty", "readme.txt"), b"nothing here")
     # half-extracted game: Sc0/ without Image0/
     write(os.path.join(out, "no_image0", "Sc0", "param.sfo"),
           build_sfo([("APP_VER", "01.09"), ("CATEGORY", "gp"), ("TITLE_ID", "CUSA00207")]))
