@@ -164,9 +164,12 @@ void oneshot_flip(double now) {
     if (++flips % 30) return;
     const uint64_t x = player_chr();
     if (!x) return;
+    // BB_DEV_ONESHOT_ANYVT=1 also accepts owners with the player's vtable (a human-type boss such as Micolash may use it); every scan logs up to 24 rejected
+    // blocks (owner vtable, HP/max) so a missed boss can be found.
+    static const bool anyvt = std::getenv("BB_DEV_ONESHOT_ANYVT") != nullptr;
     const auto enemy = [&](uint64_t a, uint64_t owner, int32_t hp[2]) {  // still a live enemy block of this owner
         const uint64_t ovt = ld64(owner);
-        return ld64(a) == kHpVt && ld64(a + 8) == owner && owner != x && ovt >= 0x400000 && ovt < 0x10000000 && ovt != kPlayerVt && peek(a + 0xf8, hp, 8) &&
+        return ld64(a) == kHpVt && ld64(a + 8) == owner && owner != x && ovt >= 0x400000 && ovt < 0x10000000 && (anyvt || ovt != kPlayerVt) && peek(a + 0xf8, hp, 8) &&
                hp[1] > 0 && hp[1] <= 100000 && hp[0] <= hp[1];
     };
 #ifdef _WIN32
@@ -187,12 +190,20 @@ void oneshot_flip(double now) {
         }
         std::vector<Blk> old;
         old.swap(blocks);
-        for (const uint64_t a : cand)
-            if (int32_t hp[2]; enemy(a, ld64(a + 8), hp)) {
-                const uint64_t o = ld64(a + 8);
+        unsigned skipped = 0;
+        for (const uint64_t a : cand) {
+            const uint64_t o = ld64(a + 8);
+            if (int32_t hp[2]; enemy(a, o, hp)) {
                 const auto it = std::find_if(old.begin(), old.end(), [&](const Blk& k) { return k.a == a && k.owner == o; });
                 blocks.push_back({a, o, it != old.end() && it->one});
+            } else if (o != x && skipped < 24) {
+                int32_t h[2] = {0, 0};
+                peek(a + 0xf8, h, 8);
+                ++skipped;
+                std::fprintf(stderr, "nav @%.2f: oneshot: skipped block %llx owner %llx ovt %llx HP %d/%d\n", now, (unsigned long long)a, (unsigned long long)o,
+                             (unsigned long long)ld64(o), h[0], h[1]);
             }
+        }
     }
 #endif
     for (Blk& b : blocks)
