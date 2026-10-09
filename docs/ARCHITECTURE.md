@@ -1,155 +1,155 @@
-# Architektur
+# Architecture
 
-Ziel: nativer PC-Port von Bloodborne 1.09 (+ The Old Hunters). Der `eboot.bin` des Nutzers wird **lokal** statisch
-nach C++ rekompiliert; alle PS4-Systembibliotheken werden durch Host-Implementierungen (HLE) ersetzt.
-Vorbild: [Dusklight](https://github.com/TwilitRealm/dusklight) (Decomp + Aurora-Kompatibilitätsschicht);
-Rekompilierungs-Konzepte aus [N64Recomp](https://github.com/N64Recomp/N64Recomp) und
-[XenonRecomp](https://github.com/hedge-dev/XenonRecomp); HLE- und GCN-Wissen aus
+Goal: native PC port of Bloodborne 1.09 (+ The Old Hunters). The user's `eboot.bin` is **locally** statically
+recompiled into C++; all PS4 system libraries are replaced by host implementations (HLE).
+Model: [Dusklight](https://github.com/TwilitRealm/dusklight) (decomp + Aurora compatibility layer);
+recompilation concepts from [N64Recomp](https://github.com/N64Recomp/N64Recomp) and
+[XenonRecomp](https://github.com/hedge-dev/XenonRecomp); HLE and GCN knowledge from
 [shadPS4](https://github.com/shadps4-emu/shadPS4).
 
-## Lizenz
+## License
 
-**GPL-3.0-or-later.** Begründung: shadPS4 (GPL-2.0-or-later) ist die mit Abstand wertvollste Code-Referenz
-(HLE, PM4, GCN→SPIR-V). Unter GPLv3 dürfen wir Code daraus übernehmen. MIT wäre für Nutzer freizügiger, würde aber jede
-Übernahme aus shadPS4 ausschließen. MIT- und Apache-2.0-Abhängigkeiten (N64Recomp, XenonRecomp, LibAtrac9, SDL3, Remill,
-[Zydis](https://github.com/zyantific/zydis) – bereits eingebunden, v4.1.1 per CMake FetchContent) sind GPLv3-kompatibel.
+**GPL-3.0-or-later.** Rationale: shadPS4 (GPL-2.0-or-later) is by far the most valuable code reference
+(HLE, PM4, GCN→SPIR-V). Under GPLv3 we may take code from it. MIT would be more permissive for users, but would rule out every
+code taken from shadPS4. MIT- and Apache-2.0 dependencies (N64Recomp, XenonRecomp, LibAtrac9, SDL3, Remill,
+[Zydis](https://github.com/zyantific/zydis) – already integrated, v4.1.1 via CMake FetchContent) are GPLv3-compatible.
 
-## Datenfluss
+## Data flow
 
 ```mermaid
 flowchart LR
-  D[Dump des Nutzers] --> I[bbinstall: validieren + kopieren]
-  I --> G[Nutzerverzeichnis/game]
-  G --> A[bbelf / Analyse: Segmente, NIDs, Relocs, Funktionen]
+  D[User's dump] --> I[bbinstall: validate + copy]
+  I --> G[User directory/game]
+  G --> A[bbelf / analysis: segments, NIDs, relocs, functions]
   A --> R[bbrecomp: x86-64 -> C++]
-  R --> B[CMake-Build lokal]
-  H[HLE-Runtime: kernel, gnm, pad, audio ...] --> B
-  K[Hooks: handgeschriebene Ersatzfunktionen] --> B
+  R --> B[Local CMake build]
+  H[HLE runtime: kernel, gnm, pad, audio ...] --> B
+  K[Hooks: hand-written replacement functions] --> B
   B --> E[BloodbornePC.exe / ELF]
 ```
 
-## Verzeichnisstruktur
+## Directory layout
 
-`[x]` = existiert, `[ ]` = geplant (entsteht mit dem jeweiligen Meilenstein, nicht vorher).
+`[x]` = exists, `[ ]` = planned (created with the respective milestone, not before).
 
 ```
 BloodbornePC/
 ├── CMakeLists.txt                 [x]
 ├── LICENSE                        [x] GPL-3.0
 ├── .github/workflows/ci.yml       [x] Windows (MSVC) + Linux (Clang)
-├── docs/                          [x] Architektur, Roadmap
-├── manifests/                     [x] SHA-256-Manifeste (nur Hashes, keine Inhalte)
+├── docs/                          [x] Architecture, Roadmap
+├── manifests/                     [x] SHA-256 manifests (hashes only, no contents)
 ├── src/
-│   ├── core/                      [x] gemeinsame Bibliothek bbcore
-│   │   ├── hash.*                     SHA-1 (NIDs), SHA-256 (Validierung)
-│   │   ├── nid.*                      NID-Erzeugung/-Decodierung
+│   ├── core/                      [x] shared library bbcore
+│   │   ├── hash.*                     SHA-1 (NIDs), SHA-256 (validation)
+│   │   ├── nid.*                      NID generation/decoding
 │   │   ├── sfo.*                      PARAM.SFO
-│   │   ├── orbis_elf.*                ELF/fSELF: Segmente, Dynamic, Module, Libs, Symbole, Relocs
-│   │   └── dump.*                     Struktur-/Hash-Prüfung, Installationspfad
-│   ├── recomp/                    [ ] M0/M1: Disassembler-Anbindung, Funktionsfinder, C++-Emitter
-│   ├── runtime/                   [ ] M1: Gast-Speicher, CPU-Kontext, TLS, Loader für rekompilierten Code
-│   ├── hle/                       [ ] M1+: eine Datei pro PS4-Bibliothek
-│   │   ├── kernel/                    Threads, Sync, Speicher, Zeit, Dateisystem (/app0 → game/)
-│   │   ├── gnm/  videoout/            M2: Vulkan-Backend
+│   │   ├── orbis_elf.*                ELF/fSELF: segments, dynamic, modules, libs, symbols, relocs
+│   │   └── dump.*                     structure/hash check, install path
+│   ├── recomp/                    [ ] M0/M1: disassembler binding, function finder, C++ emitter
+│   ├── runtime/                   [ ] M1: guest memory, CPU context, TLS, loader for recompiled code
+│   ├── hle/                       [ ] M1+: one file per PS4 library
+│   │   ├── kernel/                    threads, sync, memory, time, filesystem (/app0 → game/)
+│   │   ├── gnm/  videoout/            M2: Vulkan backend
 │   │   ├── pad/  audio/  ajm/         M3: SDL3, LibAtrac9
 │   │   └── savedata/ trophy/ user/ np/
-│   ├── renderer/                  [ ] M2: Vulkan, GCN→SPIR-V, Pipeline-Cache, Detiling
-│   ├── hooks/                     [ ] M1+: handgeschriebene Ersatzfunktionen (Frame-Timing, Kamera, HUD)
-│   └── app/                       [ ] M1: main, Config, ImGui-Overlay
+│   ├── renderer/                  [ ] M2: Vulkan, GCN→SPIR-V, pipeline cache, detiling
+│   ├── hooks/                     [ ] M1+: hand-written replacement functions (frame timing, camera, HUD)
+│   └── app/                       [ ] M1: main, config, ImGui overlay
 ├── tools/
 │   ├── bbinstall/                 [x] validate | hash | install
-│   ├── bbelf/                     [x] ELF-Analyse
+│   ├── bbelf/                     [x] ELF analysis
 │   ├── bbrecomp/                  [ ] M1
-│   └── ghidra/                    [ ] M0: Headless-Skripte (Import der bbelf-CSV, Funktionslisten)
-├── tests/                         [x] synthetische Fixtures, Known-Answer-Tests
-└── build/ (gitignored)                generierter Code landet in build/generated, nie im Repo
+│   └── ghidra/                    [ ] M0: headless scripts (import of the bbelf CSV, function lists)
+├── tests/                         [x] synthetic fixtures, known-answer tests
+└── build/ (gitignored)                generated code goes to build/generated, never in the repo
 ```
 
-## Komponenten
+## Components
 
 ### Installer (`bbinstall`)
-- Eingabe: **entpackter** Anwendungsordner mit eingespieltem Update 1.09 (`eboot.bin`, `sce_sys/param.sfo`,
-  `dvdroot_ps4/`), optional DLC-Ordner.
-- Prüfungen: `param.sfo` (TITLE_ID ∈ bekannte Bloodborne-IDs, `CATEGORY` `gd` oder `gp` (zusammengeführter Dump trägt
-  die SFO des Updates), `APP_VER=01.09`), `eboot.bin` ist ELF oder unverschlüsseltes fSELF, Datenordner (nur Warnung,
-  Layout unbestätigt), DLC `CATEGORY=ac` mit passender TITLE_ID, optional SHA-256-Manifest (maßgeblich für
-  Vollständigkeit).
-- **PKG-Eingabe wird abgelehnt.** Der PFS-Inhalt eines PS4-PKG ist verschlüsselt; ihn zu öffnen erfordert Schlüssel
-  bzw. Entschlüsselung. Beides schließen die Projektregeln aus. Der Nutzer entpackt sein PKG mit einem externen Werkzeug
-  seiner Wahl.
-- Zielverzeichnis: `%APPDATA%\BloodbornePC` bzw. `$XDG_DATA_HOME/BloodbornePC`; Unterordner `game/`, `dlc/`, `mods/`
-  (Override-Ordner mit derselben Struktur wie `game/`).
+- Input: **unpacked** application folder with installed update 1.09 (`eboot.bin`, `sce_sys/param.sfo`,
+  `dvdroot_ps4/`), optional DLC folder.
+- Checks: `param.sfo` (TITLE_ID ∈ known Bloodborne IDs, `CATEGORY` `gd` or `gp` (merged dump carries
+  the SFO of the update), `APP_VER=01.09`), `eboot.bin` is ELF or unencrypted fSELF, data folder (warning only,
+  layout unconfirmed), DLC `CATEGORY=ac` with matching TITLE_ID, optional SHA-256 manifest (authoritative for
+  completeness).
+- **PKG input is rejected.** The PFS content of a PS4 PKG is encrypted; opening it requires keys
+  or decryption. The project rules rule out both. The user unpacks their PKG with an external tool
+  of their choice.
+- Target directory: `%APPDATA%\BloodbornePC` or `$XDG_DATA_HOME/BloodbornePC`; subfolders `game/`, `dlc/`, `mods/`
+  (override folders with the same structure as `game/`).
 
-### Code-Pipeline
-Host und Gast sind beide x86-64. Daraus ergeben sich drei Optionen:
+### Code pipeline
+Host and guest are both x86-64. This yields three options:
 
-| Option | Pro | Contra |
+| Option | Pros | Cons |
 |---|---|---|
-| **A: x86-64 → C++ (XenonRecomp-Stil)** | portabel, debugbar, Hooks trivial (Funktion = C++-Funktion) | riesige Codemenge (Kompilierzeit), Flags/SIMD müssen exakt nachgebildet werden |
-| B: Lifting nach LLVM IR (Remill) | ausgereifte Semantik, LLVM optimiert | Remill-IR ist schwer lesbar, Hooks/Debugging mühsamer, große Abhängigkeit |
-| C: Originalcode nativ laden und patchen (shadPS4-Weg) | schnellster Weg zum Boot | genau der Emulator-/Loader-Ansatz, den das Projekt ausschließt; `fs`-TLS und SysV-ABI kollidieren unter Windows |
+| **A: x86-64 → C++ (XenonRecomp style)** | portable, debuggable, hooks trivial (function = C++ function) | huge amount of code (compile time), flags/SIMD must be reproduced exactly |
+| B: Lifting to LLVM IR (Remill) | mature semantics, LLVM optimizes | Remill IR is hard to read, hooks/debugging more cumbersome, large dependency |
+| C: Load original code natively and patch it (shadPS4 way) | fastest route to boot | exactly the emulator/loader approach the project rules out; `fs` TLS and SysV ABI clash under Windows |
 
-**Entscheidung: A**, mit Remill (B) als Referenz für die Semantik schwieriger Befehle. Kern des Designs:
-- Gast-Zustand liegt in einem `Context`-Struct (16 GPRs, RFLAGS-Bits, 16 YMM, `fs_base`). Jede Gast-Funktion wird zu
-  `void f_<vaddr>(Context&)`. Damit spielt die SysV/MS-ABI-Frage im Spielcode keine Rolle; nur
-  HLE-Grenzen übersetzen zwischen `Context` und C++-Signaturen (Codegenerator, nicht Laufzeit-Thunks).
-- Gastadressen bleiben gültig: Gastadresse = Link-vaddr + Load-Bias (`kLoadBias`, beim Rekompilieren fest; das eboot
-  ist bei vaddr 0 gelinkt und bekommt `0x400000`, wie auf der PS4 und in den Community-Patches). Geplant ist
-  Identity-Mapping: Der Gast-Adressraum wird an denselben Host-Adressen reserviert (`Context::base = 0`), sodass
-  Gastzeiger direkt Hostzeiger sind. `fs:`-Zugriffe übersetzt der Emitter bereits zu `c.fs_base + …`; das TLS-Setup
-  (`fs_base` je Thread auf den TCB) ist noch offen (M1.2).
-- Indirekte Sprünge/Aufrufe gehen über eine Lookup-Tabelle vaddr → Funktion; Sprungtabellen werden statisch aufgelöst.
-- Imports (`JUMP_SLOT`/`GLOB_DAT` aus `bbelf`) werden direkt mit HLE-Funktionen verbunden.
-- Hooks: Eine Tabelle vaddr → handgeschriebene Funktion ersetzt die generierte Funktion beim Codegen.
+**Decision: A**, with Remill (B) as the reference for the semantics of difficult instructions. Core of the design:
+- Guest state lives in a `Context` struct (16 GPRs, RFLAGS bits, 16 YMM, `fs_base`). Each guest function becomes
+  `void f_<vaddr>(Context&)`. As a result, the SysV/MS ABI question plays no role in game code; only
+  HLE boundaries translate between `Context` and C++ signatures (code generator, not runtime thunks).
+- Guest addresses stay valid: guest address = link vaddr + load bias (`kLoadBias`, fixed at recompile time; the eboot
+  is linked at vaddr 0 and gets `0x400000`, as on the PS4 and in the community patches). The plan is
+  identity mapping: the guest address space is reserved at the same host addresses (`Context::base = 0`), so that
+  guest pointers are directly host pointers. The emitter already translates `fs:` accesses to `c.fs_base + …`; the TLS setup
+  (`fs_base` per thread to the TCB) is still open (M1.2).
+- Indirect jumps/calls go through a lookup table vaddr → function; jump tables are resolved statically.
+- Imports (`JUMP_SLOT`/`GLOB_DAT` from `bbelf`) are bound directly to HLE functions.
+- Hooks: a table vaddr → hand-written function replaces the generated function during codegen.
 
 ### HLE / Renderer
-Siehe Roadmap. Der Renderer fängt auf **Gnm-Ebene** (`sceGnmSubmitCommandBuffers`, `sceGnmDraw*`, …) ab und parst die
-PM4-Pakete der Command Buffer selbst. Die Gnm-Treiberbibliothek schreibt nur PM4, deshalb gibt es keinen
-„generischen Command-Processor“ im Emulator-Sinn. Shader: GCN-Bytecode → SPIR-V (Konzept und Code-Basis aus
-shadPS4s `shader_recompiler`), persistenter Pipeline-Cache.
+See roadmap. The renderer intercepts at the **Gnm level** (`sceGnmSubmitCommandBuffers`, `sceGnmDraw*`, …) and parses the
+PM4 packets of the command buffers itself. The Gnm driver library only writes PM4, so there is no
+"generic command processor" in the emulator sense. Shaders: GCN bytecode → SPIR-V (concept and code base from
+shadPS4's `shader_recompiler`), persistent pipeline cache.
 
-## Bekanntes Wissen über Bloodborne 1.09 (aus Community-Patches)
-Quelle: [illusion0001/console-game-patches, Bloodborne-Orbis.yml](https://github.com/illusion0001/console-game-patches/blob/main/_patch0/orbis/Bloodborne-Orbis.yml)
-(60-FPS-Diff nach [Lance McDonald](https://www.patreon.com/posts/47314774)).
-- Title-IDs mit 1.09: CUSA00900 (US), CUSA00207 (EU), CUSA03173, CUSA00208, CUSA01363.
-- Frame-Zeit-Konstante 1/30 s bei `0x02434883` (Patch setzt 1/60); Flip-Rate über `sceVideoOutSetFlipRate` nahe `0x02ad61df`.
-- Global bei `0x059404f8`, Feld `+0x264`: laut Patch eine Physik-Deltatime, die an mehreren Stellen
-  (`0x01bf9ca9`, `0x021bc181`, `0x02377cec`, `0x02418e3d`) in Spiellogik übernommen wird. Das sind direkte Startpunkte
-  für M5 (Frame-Unlock).
-- Render-Target-Größe als Daten bei `0x055289f8/…fc` (1920×1080); Fadenkreuz-Skalierung hart auf 1920×1080 bei
+## Known facts about Bloodborne 1.09 (from community patches)
+Source: [illusion0001/console-game-patches, Bloodborne-Orbis.yml](https://github.com/illusion0001/console-game-patches/blob/main/_patch0/orbis/Bloodborne-Orbis.yml)
+(60-FPS diff by [Lance McDonald](https://www.patreon.com/posts/47314774)).
+- Title IDs with 1.09: CUSA00900 (US), CUSA00207 (EU), CUSA03173, CUSA00208, CUSA01363.
+- Frame-time constant 1/30 s at `0x02434883` (patch sets 1/60); flip rate via `sceVideoOutSetFlipRate` near `0x02ad61df`.
+- Global at `0x059404f8`, field `+0x264`: according to the patch, a physics delta time that is used at several places
+  (`0x01bf9ca9`, `0x021bc181`, `0x02377cec`, `0x02418e3d`) taken into game logic. These are direct starting points
+  for M5 (frame unlock).
+- Render target size as data at `0x055289f8/…fc` (1920×1080); crosshair scaling hard-coded to 1920×1080 at
   `0x01a44c55`, `0x01a452c7`.
-- Chromatische Aberration `0x0269faa8`, Motion Blur `0x026a057b`.
-Die Adressen sind **vaddr + `0x400000`** (Ladebasis, die GoldHEN/shadPS4 für das eboot verwenden). Belegt am echten
-eboot: Bei Patch-Adresse `0x055289f8` − `0x400000` stehen die Werte 1920 und 1080. Die Code-Adressen sind noch nicht
-gegen 1.09 geprüft, weil der bisher vorliegende Dump Version 1.00 ist.
+- Chromatic aberration `0x0269faa8`, motion blur `0x026a057b`.
+The addresses are **vaddr + `0x400000`** (load base that GoldHEN/shadPS4 use for the eboot). Confirmed on the real
+eboot: at patch address `0x055289f8` − `0x400000` the values 1920 and 1080 are found. The code addresses are not yet
+checked against 1.09, because the dump available so far is version 1.00.
 
-## Befunde am echten eboot (CUSA03173, v01.00, PKG-Entpacker-Layout)
-Mit `bbelf` ermittelt, Rohdaten nur lokal in `build/`.
-- Format: unverschlüsseltes fSELF, Typ `ET_SCE_DYNEXEC`, Image ab vaddr 0 (positionsunabhängig), Entry `0xa0`, SDK
-  `0x02000071`. Original-Dateiname `SPRJ_ps4_Master_LTO.elf`: Projektcode SPRJ, LTO-Build.
-- Ausführbares Segment 0x50da034 Bytes: Code `0xa0`–`0x2bbe9a5` (≈ 44 MiB, 176.895 Funktionen: 162.959 mit FDE, 13.936 ohne),
-  danach PLT (661 Slots) und Nur-Lese-Daten (≈ 37 MiB, keine Funktionsprologe). Daten/BSS bis 0x56d30b4,
-  `PT_TLS` 0x750 Bytes.
-- 42 benötigte Module, 701 Imports, alle über die NID-Tabelle aufgelöst (`tools/nidnames.py`). Der NID-Algorithmus
-  stimmt mit 59.278 von 59.307 öffentlichen Paaren überein; die 29 Ausnahmen sind bereinigte Namen mit Leerzeichen.
-- Imports je Bibliothek (Top): libc 216, libkernel 80 (+ libScePosix 32), libSceGnmDriver 50, libSceNet 35,
-  NpMatching2 27, Http 24, NpManager 20, NpWebApi 17, Fios2 17, AvPlayer 16 (Cutscenes), Ajm 12, SaveData 11, Pad 9,
-  VideoOut 8, AudioOut 6.
-- Relocations: 234.990, davon 231.468 `RELATIVE`, 2.838 `R_X86_64_64`, 661 `JUMP_SLOT`, 23 `GLOB_DAT`.
-- `sce_module/` enthält `libc.prx`, `libSceFios2.prx` sowie Face/Hand/HeadTracker/S3DConversion/Smart.
-  libc ist also eine eigene PRX und wird durch Host-libc-Wrapper ersetzt.
-- Befehlszählung (`bbrecomp --stats`, alle 176.895 Funktionen linear dekodiert, daher inkl. als Code gelesener
-  Tabellendaten/Padding – Werte näherungsweise): 10.690.870 Befehle, 400 verschiedene
-  Mnemonics. 24 davon decken 90 % ab, 104 decken 99 %, 199 decken 99,9 %, 272 decken 99,99 %. ISA: I86 86,5 %,
-  AVX (VEX-kodiert) 9,6 %, CMOV 0,3 %, BMI1/LZCNT/POPCNT/MOVBE vereinzelt, x87 2.376 Befehle.
-  Kein `syscall` im eboot (alles über libkernel-Imports), 17.122 `fs:`-Zugriffe (TLS). Konsequenz für den Emitter:
-  zuerst der Integer-Kern (mov/lea/call/cmp/test/push/pop/jcc/add/xor/ret…), dann AVX über `<immintrin.h>`
-  (Host ist ebenfalls x86-64), x87 zuletzt.
+## Findings on the real eboot (CUSA03173, v01.00, PKG unpacker layout)
+Determined with `bbelf`; raw data only locally in `build/`.
+- Format: unencrypted fSELF, type `ET_SCE_DYNEXEC`, image from vaddr 0 (position-independent), entry `0xa0`, SDK
+  `0x02000071`. Original file name `SPRJ_ps4_Master_LTO.elf`: project code SPRJ, LTO build.
+- Executable segment 0x50da034 bytes: code `0xa0`–`0x2bbe9a5` (≈ 44 MiB, 176,895 functions: 162,959 with FDE, 13,936 without),
+  followed by PLT (661 slots) and read-only data (≈ 37 MiB, no function prologues). Data/BSS up to 0x56d30b4,
+  `PT_TLS` 0x750 bytes.
+- 42 required modules, 701 imports, all resolved via the NID table (`tools/nidnames.py`). The NID algorithm
+matches 59,278 of 59,307 public pairs; the 29 exceptions are cleaned-up names with spaces.
+- Imports per library (top): libc 216, libkernel 80 (+ libScePosix 32), libSceGnmDriver 50, libSceNet 35,
+NpMatching2 27, Http 24, NpManager 20, NpWebApi 17, Fios2 17, AvPlayer 16 (cutscenes), Ajm 12, SaveData 11, Pad 9,
+VideoOut 8, AudioOut 6.
+- Relocations: 234,990, of which 231,468 `RELATIVE`, 2,838 `R_X86_64_64`, 661 `JUMP_SLOT`, 23 `GLOB_DAT`.
+- `sce_module/` contains `libc.prx`, `libSceFios2.prx` as well as Face/Hand/HeadTracker/S3DConversion/Smart.
+  So libc is its own PRX and is replaced by host libc wrappers.
+- Instruction count (`bbrecomp --stats`, all 176,895 functions decoded linearly, hence including table data/padding read as
+code – values approximate): 10,690,870 instructions, 400 distinct
+mnemonics. 24 of them cover 90 %, 104 cover 99 %, 199 cover 99.9 %, 272 cover 99.99 %. ISA: I86 86.5 %,
+AVX (VEX-encoded) 9.6 %, CMOV 0.3 %, BMI1/LZCNT/POPCNT/MOVBE sporadic, x87 2,376 instructions.
+No `syscall` in the eboot (everything goes through libkernel imports), 17,122 `fs:` accesses (TLS). Consequence for the emitter:
+first the integer core (mov/lea/call/cmp/test/push/pop/jcc/add/xor/ret…), then AVX via `<immintrin.h>`
+(host is also x86-64), x87 last.
 
-## Annahmen
-1. ✅ Spieldaten liegen lose unter `dvdroot_ps4/` (action, chr, event, facegen, map, menu, movie, msg, mtd, obj, other,
+## Assumptions
+1. ✅ Game data lies unpacked under `dvdroot_ps4/` (action, chr, event, facegen, map, menu, movie, msg, mtd, obj, other,
    param, paramdef, parts, remo, script, sfx, shader, sound).
-2. ❓ Ob der DLC eigene Daten enthält oder nur ein Freischalt-Eintrag ist, ist unbekannt. Ein DLC-Dump zeigt es.
-   CUSA03173 ist möglicherweise eine Edition mit enthaltenem DLC (unbelegt).
-3. ✅ `ET_SCE_DYNEXEC`, aber **nicht** mit fester Basis: Das Image beginnt bei vaddr 0. Die Runtime mappt es an einer
-   gewählten Basis (`0x400000` passt zu den Patch-Adressen) und wendet die `RELATIVE`-Relocs an.
+2. ❓ Whether the DLC contains its own data or is only an unlock entry is unknown. A DLC dump will show it.
+   CUSA03173 may be an edition that includes the DLC (unverified).
+3. ✅ `ET_SCE_DYNEXEC`, but **not** with a fixed base: the image starts at vaddr 0. The runtime maps it at a
+   chosen base (`0x400000` matches the patch addresses) and applies the `RELATIVE` relocs.
